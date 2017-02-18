@@ -37,7 +37,7 @@ import salt.utils.cloud
 __virtualname__ = "ahv"
 
 
-_LOG = logging.getLogger(__name__)
+_LOG = logging.getLogger("ahv")
 
 DEBUG = _LOG.debug
 INFO = _LOG.info
@@ -51,6 +51,10 @@ def ASSERT(boolean, msg="", exc_type=AssertionError):
   """
   if not boolean:
     raise exc_type(msg)
+
+def _get_log_adapter(vm_):
+  adapter = logging.LoggerAdapter(_LOG, {"instance_name": vm_["name"]})
+  return adapter.debug, adapter.info, adapter.warning, adapter.error
 
 
 try:
@@ -66,18 +70,27 @@ except ImportError as exc:
 
 # ifcfg-<DEVICE>
 IFCFG_TMPL = """DEVICE={DEVICE}
+TYPE=Ethernet
+DEFROUTE=yet
 ONBOOT=yes
+IPV4_FAILURE_FATAL=yes
+IPV6INIT=no
 NM_CONTROLLED=no
 BOOTPROTO=static
 DNS1={DNS_1}
 DNS2={DNS_2}
-DOMAIN="{DOMAIN}"
 IPADDR={IPADDR}
 NETMASK={NETMASK}
-GATEWAY={GATEWAY}"""
+GATEWAY={GATEWAY}
+SEARCH="{DOMAIN}"
+"""
 
 
 CLOUD_INIT_TMPL = """#cloud-config
+hostname: {HOSTNAME}
+fqdn: {FQDN}
+manage_etc_hosts: True
+
 write_files:
   - encoding: b64
     content: {CONTENT}
@@ -85,10 +98,20 @@ write_files:
     path: /etc/sysconfig/network-scripts/ifcfg-{DEVICE}
     permissions: 0644
 
-runcmd:
-  - [ service, network, disable ]
+bootcmd:
   - [ ifdown, {DEVICE}, down ]
   - [ ifup, {DEVICE}, up ]
+
+cloud_init_modules:
+  - write_files
+  - bootcmd
+  - set_hostname
+  - update_etc_hosts
+
+cloud_config_modules: []
+
+cloud_final_modules:
+  - final_message
 """
 
 #==============================================================================
@@ -198,30 +221,33 @@ class SaltDestroyedEvent(SaltEvent):
   def get_event(cls):
     return "destroyed"
 
+
 # TODO (jklein): Clean this up too...
 class SaltVm(object):
   __KEYS__ = ("id", "image", "size", "state", "private_ips", "public_ips")
+
   def __init__(self, entity_json):
+    config_json = entity_json["config"]
+
     # VM UUID
     self.id = entity_json["uuid"]
 
-    # ? (Need to check canonical salt vm states)
+    # TODO (jklein): See if we need to convert/restrict to a canonical set of
+    # Salt-defined states.
     self.state = entity_json["state"]
 
-    entity_json = entity_json["config"]
-
     # Name of image from which VM was created
-    self.image = entity_json.get("sourceImage", "")
+    self.image = config_json.get("sourceImage", "")
 
     # Resource info for VM
     self.size = "%s vCPUs, %s MB RAM" % (
-      entity_json["numVcpus"], entity_json["memoryMb"])
+      config_json["numVcpus"], config_json["memoryMb"])
+
+    # VM external IPs
+    self.public_ips = entity_json.get("ipAddresses", [])
 
     # VM internal IPs
     self.private_ips = []
-
-    # VM external IPs
-    self.public_ips = [] #entity_json["ipAddresses"]
 
   def to_dict(self):
     return dict((k, getattr(self, k)) for k in self.__KEYS__)
@@ -246,7 +272,7 @@ class AhvDiskSpec(object):
   def __init__(self, bus_type="scsi",
                bus_index=None, is_cdrom=False, is_empty=False):
     self.disk_address = {"deviceBus": bus_type}
-    if bus_index:
+    if bus_index is not None:
       self.disk_address["deviceIndex"] = bus_index
     self.is_cdrom = is_empty
     self.is_empty = is_empty
@@ -304,17 +330,46 @@ class AhvVmCreateSpec(object):
 
   @classmethod
   def from_salt_vm_dict(cls, vm_, conn):
-    kwargs = {"name": vm_["name"],
-              "container_name": vm_["container"]}
+    #ASSERT("name" in vm_)
+    ASSERT("container" in vm_)
+
+    kwargs = {}
+
+    clone_vm_uuid = None
+    if "clonefrom_vm" in vm_:
+      clone_target_json = conn.vms_get(name=vm_["clonefrom_vm"])
+      ASSERT(len(clone_target_json) == 1)
+      clone_target_json = clone_target_json[0]
+
+      for key, val in cls.__KEY_MAP__.iteritems():
+        if val in clone_target_json:
+          kwargs[key] = clone_target_json[val]
+
+      clone_vm_uuid = clone_target_json["uuid"]
+
+    # TODO (jklein): Support cloning from image service.
+    #if "clonefrom_image_service":
+    # images_map = dict((i["name"], i) for i in conn.images_get())
+    # ASSERT(vm_["clonefrom"] in images_map)
+    # vm_disk_uuid = images_map[vm_["clonefrom"]]["vmDiskId"]
+    # ret = conn.virtual_disk_get(vm_disk_uuid)
 
     for key in cls.__KEY_MAP__.iterkeys():
       if key in vm_:
         kwargs[key] = vm_[key]
-
+    kwargs["container_name"] = vm_["container"]
     vm_spec = cls(**kwargs)
 
     vm_spec.resolve_container(conn)
     network_map = dict((n["name"], n) for n in conn.networks_get())
+
+    if not "clonefrom_vm" in vm_:
+      pass
+      # for vm_disk_uuid in clone_target_json["nutanixVirtualDiskUuids"]:
+      #   vm_disk_json = conn.virtual_disk_get(vm_disk_uuid)
+      #   bus_type, bus_index = vm_disk_json["diskAddress"].split(".")
+      #   vm_spec.clone_disk(vm_disk_uuid, bus_type, int(bus_index))
+
 
     for name, spec in vm_.get("network", {}).iteritems():
       if spec["name"] not in network_map:
@@ -322,29 +377,23 @@ class AhvVmCreateSpec(object):
           "Unable to locate requested network '%s' for adapter '%s'" %
           (spec["name"], name))
       vm_spec.add_network(network_map[spec["name"]]["uuid"])
-      #vm_spec.inject_network_script("eth0", vm_)
+      vm_spec.inject_network_script("eth0", vm_)
 
-    for name, spec in vm_.get("disk", {}).iteritems():
-      bus_type, bus_index = name.split(".")
-      vm_spec.add_disk(spec["size"]*1024**3, bus_type, int(bus_index))
+    # for name, spec in vm_.get("disk", {}).iteritems():
+    #   bus_type, bus_index = name.split(".")
+    #   vm_spec.add_disk(spec["size"]*1024**3, bus_type, int(bus_index))
 
-    if "clonefrom" in vm_:
-      vms = conn.vms_get(name=vm_["clonefrom"])
-      ASSERT(len(vms) == 1)
-      vm_disk_uuid = vms[0]["nutanixVirtualDiskUuids"][0]
-      # images_map = dict((i["name"], i) for i in conn.images_get())
-      # ASSERT(vm_["clonefrom"] in images_map)
-      # vm_disk_uuid = images_map[vm_["clonefrom"]]["vmDiskId"]
-      # ret = conn.virtual_disk_get(vm_disk_uuid)
-
+    if False:
+    #if "clonefrom_vm" in vm_:
       if False: #ret.get("diskAddress"):
         # bus_type, bus_index = ret["diskAddress"].split(".")
         # vm_spec.clone_disk(vm_disk_uuid, bus_type, int(bus_index))
         pass
       else:
-        vm_spec.clone_disk(vm_disk_uuid)
+        #vm_spec.clone_disk(vm_disk_uuid)
+        pass
 
-    return vm_spec
+    return clone_vm_uuid, vm_spec
 
   def __init__(self, name, memory_mb=1024, num_vcpus=1,
                num_cores_per_vcpu=1, description="", container_name=""):
@@ -388,7 +437,9 @@ class AhvVmCreateSpec(object):
 
     self._cloud_init_config = CLOUD_INIT_TMPL.format(**{
       "CONTENT": base64.b64encode(ifcfg),
-      "DEVICE": device
+      "DEVICE": device,
+      "HOSTNAME": vm_.get("hostname", vm_["name"]),
+      "FQDN": "%s.eng.nutanix.com" % vm_.get("hostname", vm_["name"])
     })
 
   def add_network(self, uuid):
@@ -439,25 +490,56 @@ class AhvVmCreateSpec(object):
 #==============================================================================
 
 class PrismAPIClient(object):
-  def async_task(func):
-    # pylint: disable=no-self-argument
+  """
+  Client for the Prism v1 REST API and v0.8 management REST API.
+  """
+
+  #============================================================================
+  # Decorators
+  #============================================================================
+
+  def async_task(*func, **kwargs):
+    # pylint: disable=no-self-argument,no-method-argument
     """
     Decorator for REST APIs corresponding to asynchronous tasks.
     """
-    @functools.wraps(func)
-    def _wrapped(*args, **kwargs):
-      # pylint: disable=not-callable
-      try:
-        resp = func(*args, **kwargs).json()
-      except Exception as exc:
-        raise SaltCloudExecutionFailure(str(exc))
+    def _async_task_wrapper(_func):
+      @functools.wraps(_func)
+      def _wrapped(self, *_args, **_kwargs):
+        # pylint: disable=not-callable
+        try:
+          resp = _func(self, *_args, **_kwargs).json()
+        except Exception as exc:
+          raise SaltCloudExecutionFailure(str(exc))
 
-      if "taskUuid" not in resp:
-        raise SaltCloudExecutionFailure()
+        if "taskUuid" not in resp:
+          raise SaltCloudExecutionFailure(resp)
 
-      return resp["taskUuid"]
+        task_uuid = resp["taskUuid"]
+        if not kwargs.get("block", True):
+          return task_uuid
 
-    return _wrapped
+        timeout_secs = kwargs.get("timeout_secs", 60)
+        DEBUG("Blocking on task '%s' (timeout: %s seconds)",
+              task_uuid, timeout_secs)
+        success, resp_json = self.poll_progress_monitor(
+          task_uuid, timeout_secs=timeout_secs)
+        if kwargs.get("raise_on_error", True) and not success:
+          raise SaltCloudExecutionFailure()
+
+        return resp_json
+
+      return _wrapped
+
+    # Check for case where optional arguments are omitted and decorator is
+    # applied directly to the target function.
+    if func:
+      ASSERT(len(func) == 1 and callable(func[0]),
+             "Unexpected argument provided to @async_task")
+      ASSERT(not kwargs, "@async_task passed a callable argument, but was not "
+             "applied as a parameter-free decorator")
+      return _async_task_wrapper(func[0])
+    return _async_task_wrapper
 
   def entity_list(func):
     # pylint: disable=no-self-argument
@@ -493,6 +575,10 @@ class PrismAPIClient(object):
         raise SaltCloudExecutionFailure(str(exc))
     return _wrapped
 
+  #============================================================================
+  # Init
+  #============================================================================
+
   def __init__(self, host, user, password, port=9440,
                base_path="/PrismGateway/services/rest/v1",
                base_mgmt_path="/api/nutanix/v0.8"):
@@ -512,25 +598,36 @@ class PrismAPIClient(object):
   # Public util methods
   #============================================================================
 
-  def remove_cloud_init_cd(self, uuid):
+  def remove_cloud_init_cd(self, uuid, device_index=3):
     """
     Removes CD drive created to mount cloud-init scripts for VM 'uuid'.
     """
-    # NB: Cloud-init CD drive is always created as ide:3.
-    pass
+    # NB: Currently cloud-init CD drive is always created as ide-3.
+    self.vms_power_op(uuid, "off")
+    task_uuid = self._delete(
+      "%s/vms/%s/disks/ide-%d" %
+      (self._base_mgmt_path, uuid, device_index)).json()["taskUuid"]
+    success, _ = self.poll_progress_monitor(task_uuid)
+    if not success:
+      raise SaltCloudException()
+    self.vms_power_op(uuid, "on")
 
-  def poll_progress_monitor(self, uuid):
-    while True:
-      INFO("Waiting on '%s'", uuid)
+  def poll_progress_monitor(self, uuid, timeout_secs=60):
+    deadline_secs = time.time() + timeout_secs
+    while time.time() < deadline_secs:
+      DEBUG("Waiting on task '%s'", uuid)
       resp = self.progress_monitors_get(uuid=uuid)
       ASSERT(len(resp) == 1)
       pct_complete = int(resp[0].get("percentageCompleted", 0))
       if pct_complete == 100:
         return str(resp[0].get("status")).lower(), resp[0]
 
-      INFO("Task in progress: %s", resp[0].get("status"))
+      DEBUG("Task in progress: %s", resp[0].get("status"))
 
       time.sleep(1)
+
+    raise SaltCloudExecutionTimeout("Task '%s' timed out after %s seconds" %
+                                    (uuid, timeout_secs))
 
   #============================================================================
   # Undocumented APIs
@@ -560,9 +657,15 @@ class PrismAPIClient(object):
 
   @entity_list
   def clusters_get(self):
+    """
+    Looks up available clusters.
+    """
     return self._get("%s/clusters" % self._base_path)
 
   def container_get(self, name=None, uuid=None):
+    """
+    Looks up a storage container by 'name' or 'uuid'.
+    """
     ASSERT(bool(name) ^ bool(uuid),
            "Must specify exactly one of 'name', 'uuid'")
     resp = self._get(
@@ -575,13 +678,22 @@ class PrismAPIClient(object):
 
   @entity_list
   def containers_get(self):
+    """
+    Lists available storage containers.
+    """
     return self._get("%s/containers" % self._base_path)
 
   @entity
   def virtual_disk_get(self, uuid):
+    """
+    Looks up a virtual disk by 'uuid'.
+    """
     return self._get("%s/virtual_disks/%s" % (self._base_path, uuid))
 
   def vms_get(self, name=None, uuid=None):
+    """
+    Looks up available VMs, filtering on 'name' or 'uuid' if provided.
+    """
     ASSERT(not (name and uuid))
     params = {}
     if uuid:
@@ -590,16 +702,51 @@ class PrismAPIClient(object):
       params["searchString"] = name
       # NB: Fields as defined in $TOP/zeus/configuration.proto
       params["searchAttributeList"] = "vm_name"
-    # TODO (jklein): Don't mix APIs.
     if params:
-      return self._get(
+      ret = self._get(
         "%s/vms" % self._base_path, params=params).json()["entities"]
-    return self._get("%s/vms" % self._base_mgmt_path).json()["entities"]
+      for vm_json in ret:
+        if vm_json["vmName"] == name:
+          return [vm_json]
+    # TODO (jklein): Doesn't seem to be any way to avoid querying both APIs.
+    ret = self._get("%s/vms" % self._base_mgmt_path).json()["entities"]
+    ret2 = dict((vm_json["vmName"], vm_json)
+                for vm_json in self._get(
+                  "%s/vms" % self._base_path).json()["entities"])
+
+    for vm_json in ret:
+      vm_json.update(ret2[vm_json["config"]["name"]])
+
+    return ret
 
   @async_task
   def vms_create(self, spec):
+    """
+    Creates a new VM according to 'spec'.
+
+    Raises:
+      SaltCloudExecutionFailure if the task is not created successfully.
+    """
     return self._post("%s/vms" % self._base_path,
                       data=json.dumps(spec.to_dict()))
+
+  @async_task
+  def vms_clone(self, uuid, spec):
+    """
+    Clones VM with UUID 'uuid' according to 'spec'.
+
+    Raises:
+      SaltCloudExecutionFailure if the task is not created successfully.
+    """
+    spec = remove_keys(spec.to_dict(), "vmDisks")
+    spec["overrideNetworkConfig"] = True
+    for nic in spec["vmNics"]:
+      nic["requestIp"] = False
+    customization = spec.pop("vmCustomizationConfig")
+    return self._post("%s/vms/%s/clone" % (self._base_path, uuid),
+                      data=json.dumps(
+                        {"specList": [spec, ],
+                         "vmCustomizationConfig": customization}))
 
   #============================================================================
   # Public APIs (mgmt v0.8)
@@ -653,7 +800,7 @@ class PrismAPIClient(object):
     Asynchronous operation, returns UUID of the corresponding task.
 
     Raises:
-      SaltCloudExecutionFailure if delete task is not created successfully.
+      SaltCloudExecutionFailure if the task is not created successfully.
     """
     return self._delete("%s/vms/%s" % (self._base_mgmt_path, uuid))
 
@@ -665,13 +812,16 @@ class PrismAPIClient(object):
     Args:
       uuid (str): UUID of VM on which to perform 'op'.
       op (str): Power to perform on the VM. Either "on" or "off".
+
+    Raises:
+      SaltCloudExecutionFailure if the task is not created successfully.
     """
     op = str(op).lower()
     ASSERT(op in ["on", "off"])
     vm_json = self.vms_get(uuid=uuid)[0]
     if vm_json.get("powerState") == op:
-      INFO("Skipping power op for VM '%s' already in requested state '%s'",
-           uuid, op)
+      DEBUG("Skipping power op for VM '%s' already in requested state '%s'",
+            uuid, op)
       return None
 
     return self._post("%s/vms/%s/power_op/%s" %
@@ -698,8 +848,7 @@ class PrismAPIClient(object):
     if not func:
       raise SaltCloudSystemExit("Invalid HTTP method '%s'" % verb)
 
-    return func(url, data=data, params=params if params else {},
-                verify=False)
+    return func(url, data=data, params=params if params else {}, verify=False)
 
 #==============================================================================
 # Utils
@@ -707,13 +856,13 @@ class PrismAPIClient(object):
 
 def get_configured_provider():
   return salt.config.is_provider_configured(
-    __opts__, __active_provider_name__ or __virtualname__, required_keys=(
-      "user", "password", "prism_ip"))
+    __opts__, __active_provider_name__ or __virtualname__,
+    required_keys=("user", "password", "prism_ip"))
 
 
 def get_dependencies():
-  return salt.config.check_driver_dependencies(__virtualname__, {
-    "requests": _HAS_REQUESTS})
+  return salt.config.check_driver_dependencies(__virtualname__,
+                                               {"requests": _HAS_REQUESTS})
 
 
 def get_conn():
@@ -749,6 +898,10 @@ def remove_keys(entity, keys):
 def action(func):
   """
   Decorator which ensures 'func' was properly called as an "action".
+
+  Raises:
+    (SaltCloudSystemExit) Error message if the method was not invoked as a
+      salt-cloud action call.
   """
   @functools.wraps(func)
   def _action(*args, **kwargs):
@@ -762,6 +915,10 @@ def action(func):
 def function(func):
   """
   Decorator which ensures 'func' was properly called as a "function".
+
+  Raises:
+    (SaltCloudSystemExit) Error message if the method was not invoked as a
+      salt-cloud function call.
   """
   @functools.wraps(func)
   def _action(*args, **kwargs):
@@ -785,6 +942,11 @@ def conn_in(func):
 
 
 def fire_start_end_events(start_event, end_event):
+  """
+  Returns:
+    (callable) A decorator which fires 'start_event'/'end_event' before/after
+      the wrapped function.
+  """
   def fire_start_end_events_decorator(func):
     def _wrapped(vm_, *args, **kwargs):
       _vm_ = vm_
@@ -819,52 +981,45 @@ def create(vm_, conn=None, call=None):
     conn (PrismAPIClient|None): Optional. Connection to use. If None, a new
       connection will be injected by the @conn_in decorator.
     call (str|None): Method by which this functions is being invoked.
-  """
-  ret = {"status":
-           {"created": False,
-            "powered on": False,
-            "minion deployed": False}
-         }
-  INFO("Handling create request for VM %s...", vm_["name"])
 
-  vm_spec = AhvVmCreateSpec.from_salt_vm_dict(vm_, conn)
-  DEBUG("Generated VmCreateSpec: %s",
+  Returns:
+    (dict<str,str>): Map of configuration steps to boolean success.
+  """
+  DEBUG, INFO, WARNING, ERROR = _get_log_adapter(vm_)
+  ret = {"created": False,
+         "powered on": False,
+         "deployed minion": False}
+  INFO("Handling instance create...")
+
+  clone_vm_uuid, vm_spec = AhvVmCreateSpec.from_salt_vm_dict(vm_, conn)
+  DEBUG("Generated VmCloneSpec: %s",
         json.dumps(vm_spec.to_dict(), indent=2, sort_keys=True))
 
-  INFO("Issuing VM Create request...")
+  DEBUG("Issuing CloneVM request to Prism...")
   SaltRequestingEvent.fire(vm_)
-  task_uuid = conn.vms_create(vm_spec)
-  DEBUG("VM Create task '%s' created", task_uuid)
-
-  INFO("Waiting for VM creation to complete...")
-  success, task_json = conn.poll_progress_monitor(task_uuid)
-  if not success:
-    raise SaltCloudExecutionTimeout()
-  DEBUG("VM Creation task '%s' complete", task_uuid)
-  ret["status"]["created"] = True
+  task_json = conn.vms_clone(clone_vm_uuid, vm_spec)
+  DEBUG("VM clone task complete")
+  INFO("VM created")
+  ret["created"] = True
 
   if not vm_.get("power_on"):
     return ret
 
-  INFO("Powering on VM...")
-  task_uuid = conn.vms_power_op(task_json["entityId"][0], "on")
-  DEBUG("VM Power Op task '%s' created", task_uuid)
-  success, task_json = conn.poll_progress_monitor(task_uuid)
-  if not success:
-    raise SaltCloudExecutionTimeout()
+  INFO("Powering on VM")
+  vm_uuid = task_json["entityId"][0]
+  conn.vms_power_op(vm_uuid, "on")
   INFO("VM powered on successfully")
-  ret["status"]["powered on"] = True
+  ret["powered on"] = True
 
   if not vm_.get("deploy"):
     return ret
 
   SaltDeployingEvent.fire(vm_)
   # TODO (jklein): Cap waiting at something.
-  INFO("Waiting for VM %s to acquire IP...", vm_["name"])
+  INFO("Waiting for VM to acquire IP...")
   t0 = time.time()
   while True:
-    DEBUG("Waiting for VM %s to acquire IP... %d seconds",
-          vm_["name"], time.time() - t0)
+    DEBUG("Waiting for VM to acquire IP...%d seconds", time.time() - t0)
     vm_json = conn.vms_get(name=vm_["name"])[0]
     if vm_json["ipAddresses"]:
       INFO("Acquired IP: %s", vm_json["ipAddresses"])
@@ -873,11 +1028,31 @@ def create(vm_, conn=None, call=None):
 
     time.sleep(1)
 
+  INFO("Detaching cloud-init customization CD...")
+  conn.remove_cloud_init_cd(vm_uuid)
+  INFO("Detached cloud-init customization CD")
+
+  # TODO (jklein): Cap waiting at something.
+  INFO("Waiting for VM to acquire IP...")
+  t0 = time.time()
+  while True:
+    DEBUG("Waiting for VM to acquire IP...%d seconds", time.time() - t0)
+    vm_json = conn.vms_get(name=vm_["name"])[0]
+    if vm_json["ipAddresses"]:
+      INFO("Acquired IP: %s", vm_json["ipAddresses"])
+      vm_["ssh_host"] = vm_json["ipAddresses"][0]
+      if vm_["ssh_host"] == vm_["network"].values()[0]["ip"]:
+        break
+      else:
+        ERROR("Incorrect IP detected: %s", vm_["ssh_host"])
+
+    time.sleep(1)
+
   INFO("Bootstrapping salt...")
   SaltWaitingForSSHEvent.fire(vm_)
   __utils__["cloud.bootstrap"](vm_, __opts__)
-  INFO("Bootstrap complete! Finished creating VM %s", vm_["name"])
-  ret["status"]["deployed minion"] = True
+  INFO("Bootstrap complete!")
+  ret["deployed minion"] = True
   return ret
 
 
@@ -893,19 +1068,23 @@ def destroy(vm_name, conn=None, call=None):
       connection will be injected by the @conn_in decorator.
     call (str|None): Method by which this functions is being invoked.
 
+  Returns:
+    {"message": <str>} Message to display on success.
+
   Raises:
     SaltCloudNotFound if unable to locate a matching VM, or if 'name' does
       not uniquely identify the VM.
   """
-  INFO("Deleting VM '%s'", vm_name)
+  DEBUG, INFO, WARNING, ERROR = _get_log_adapter({"name": vm_name})
+  INFO("Handling instance destroy...")
   vm_json = get_entity_by_key(conn.vms_get(name=vm_name), "vmName", vm_name)
   task_uuid = conn.vms_delete(vm_json["uuid"])
-  DEBUG("Created VM Delete task '%s'", task_uuid)
-
+  DEBUG("Created VM Delete task")
   if not conn.tasks_poll(task_uuid):
-    raise SaltCloudException("Deletion task failed for VM %s" % vm_name)
+    raise SaltCloudException("Deletion task failed for VM '%s'" % vm_name)
 
-  INFO("Deleted VM %s", vm_name)
+  INFO("Deleted VM")
+  return {"message": "Successfully deleted"}
 
 
 
@@ -920,9 +1099,10 @@ def avail_locations(conn=None, call=None):
     call (str|None): Method by which this functions is being invoked.
 
   Returns:
-    list<str>: List of cluster names accessible via the configured Prism IP.
+    (dict<str,dict>): Map of cluster names to cluster metadata for clusters
+      accessible via the configured Prism IP.
   """
-  return dict((c["name"], c) for c in conn.clusters_get())
+  return dict((cluster["name"], cluster) for cluster in conn.clusters_get())
 
 
 @conn_in
@@ -936,16 +1116,21 @@ def avail_images(conn=None, call=None):
     call (str|None): Method by which this functions is being invoked.
 
   Returns:
-    dict<str,dict>: Map of image names to image metadata for all images known
-      to the image service.
+    (dict<str,dict>): Map of image names to image metadata for all images
+      known to the image service.
   """
-  return dict((i["name"], i) for i in conn.images_get())
+  return dict((img["name"], img) for img in conn.images_get())
 
 
 def avail_sizes(call=None):
   """
+  Lists available options for configuring VM CPU/RAM.
+
   Args:
     call (str|None): Kind of call by which this function was invoked.
+
+  Returns:
+    (dict<str, str>) Map of argument names to descriptions.
   """
   return {
     "<num_vcpus>": "Number of vCPUs with which to configure the VM",
@@ -966,10 +1151,10 @@ def list_nodes(conn=None, call=None):
   NB: Terminology conflicts with Acropolis terminology.
 
   Returns:
-    dict<str,SaltVm>: Canonical salt metadata for available VMs.
+    (dict<str,SaltVm>) Map of VM names to canonical salt metadata for
+      corresponding VMs.
   """
-  return dict((vm["config"]["name"], SaltVm(vm).to_dict())
-              for vm in conn.vms_get())
+  return dict((vm["vmName"], SaltVm(vm).to_dict()) for vm in conn.vms_get())
 
 
 @conn_in
@@ -983,10 +1168,10 @@ def list_nodes_full(conn=None, call=None):
   NB: Terminology conflicts with Acropolis terminology.
 
   Returns:
-    dict<str,AcropolisVm>: Canonical salt metadata enriched with
+    (dict<str,AcropolisVm>): Canonical salt metadata enriched with
       additional Acropolis-specific metadata for available VMs.
   """
-  return dict((vm["config"]["name"], vm) for vm in conn.vms_get())
+  return dict((vm["vmName"], vm) for vm in conn.vms_get())
 
 
 @conn_in
@@ -1001,8 +1186,8 @@ def list_nodes_select(conn=None, call=None):
   NB: Terminology conflicts with Acropolis terminology.
 
   Returns:
-    list<AcropolisVm>: Metadata for available VMs restricted to specified
-      fields.
+    (dict<str, dict>) Map of VM names to VM metadata for available VMs
+      restricted to specified fields.
   """
   return salt.utils.cloud.list_nodes_select(
     list_nodes_full(conn=conn, call="function"),
@@ -1020,6 +1205,9 @@ def show_instance(name, conn=None, call=None):
     conn (PrismAPIClient|None): Optional. Connection to use. If None, a new
       connection will be injected by the @conn_in decorator.
     call (str|None): Method by which this functions is being invoked.
+
+  Returns:
+    (dict<str, AcropolisVm>) Map of VM name to full VM metadata.
   """
   vm_json = get_entity_by_key(conn.vms_get(name=name), "vmName", name)
   return remove_keys(vm_json, ["stats, usageStats"])
@@ -1030,9 +1218,11 @@ def show_instance(name, conn=None, call=None):
 
 @function
 def generate_sample_profile(call=None):
+  # TODO
   pass
 
 
 @function
 def generate_sample_map(call=None):
+  # TODO
   pass
