@@ -61,18 +61,9 @@ INFO = _LOG.info
 WARNING = _LOG.warning
 ERROR = _LOG.error
 
-def ASSERT(boolean, msg="", exc_type=AssertionError):
-  """
-  Function which acts like the 'assert' statement, but will not be stripped
-  out by the interpreter when optimizing code.
-  """
-  if not boolean:
-    raise exc_type(msg)
-
 def _get_log_adapter(vm_):
   adapter = logging.LoggerAdapter(_LOG, {"instance_name": vm_["name"]})
   return adapter.debug, adapter.info, adapter.warning, adapter.error
-
 
 try:
   import requests
@@ -347,15 +338,15 @@ class AhvVmCreateSpec(object):
 
   @classmethod
   def from_salt_vm_dict(cls, vm_, conn):
-    #ASSERT("name" in vm_)
-    ASSERT("container" in vm_)
+    # assert "name" in vm_
+    assert "container" in vm_
 
     kwargs = {}
 
     clone_vm_uuid = None
     if "clonefrom_vm" in vm_:
       clone_target_json = conn.vms_get(name=vm_["clonefrom_vm"])
-      ASSERT(len(clone_target_json) == 1)
+      assert len(clone_target_json) == 1
       clone_target_json = clone_target_json[0]
 
       for key, val in cls.__KEY_MAP__.iteritems():
@@ -367,7 +358,7 @@ class AhvVmCreateSpec(object):
     # TODO (jklein): Support cloning from image service.
     #if "clonefrom_image_service":
     # images_map = dict((i["name"], i) for i in conn.images_get())
-    # ASSERT(vm_["clonefrom"] in images_map)
+    # assert vm_["clonefrom"] in images_map
     # vm_disk_uuid = images_map[vm_["clonefrom"]]["vmDiskId"]
     # ret = conn.virtual_disk_get(vm_disk_uuid)
 
@@ -437,8 +428,8 @@ class AhvVmCreateSpec(object):
 
   def inject_network_script(self, device, vm_):
     net_json = vm_["network"].values()
-    ASSERT(len(net_json) == 1,
-           "Currently multiple network interfaces are not supported")
+    assert len(net_json) == 1, \
+           "Currently multiple network interfaces are not supported"
     net_json = net_json[0]
 
     ifcfg = IFCFG_TMPL.format(**{
@@ -466,9 +457,8 @@ class AhvVmCreateSpec(object):
     self.vm_disks.append(AhvDiskSpec("ide", is_empty=True, is_cdrom=True))
 
   def add_disk(self, size_bytes, bus_type, bus_index):
-    ASSERT(
-      self.container_uuid,
-      "Cannot add disk without resolving container UUID from container name")
+    assert self.container_uuid, \
+      "Cannot add disk without resolving container UUID from container name"
     spec = AhvDiskSpec(bus_type, bus_index)
     spec.vm_disk_create = AhvDiskCreateSpec(self.container_uuid,
                                             size=size_bytes)
@@ -551,10 +541,11 @@ class PrismAPIClient(object):
     # Check for case where optional arguments are omitted and decorator is
     # applied directly to the target function.
     if func:
-      ASSERT(len(func) == 1 and callable(func[0]),
-             "Unexpected argument provided to @async_task")
-      ASSERT(not kwargs, "@async_task passed a callable argument, but was not "
-             "applied as a parameter-free decorator")
+      assert len(func) == 1 and callable(func[0]), \
+             "Unexpected argument provided to @async_task"
+      assert not kwargs, \
+        "@async_task passed a callable argument, but was not applied as a " \
+        "parameter-free decorator"
       return _async_task_wrapper(func[0])
     return _async_task_wrapper
 
@@ -634,7 +625,7 @@ class PrismAPIClient(object):
     while time.time() < deadline_secs:
       DEBUG("Waiting on task '%s'", uuid)
       resp = self.progress_monitors_get(uuid=uuid)
-      ASSERT(len(resp) == 1)
+      assert len(resp) == 1
       pct_complete = int(resp[0].get("percentageCompleted", 0))
       if pct_complete == 100:
         return str(resp[0].get("status")).lower(), resp[0]
@@ -683,14 +674,14 @@ class PrismAPIClient(object):
     """
     Looks up a storage container by 'name' or 'uuid'.
     """
-    ASSERT(bool(name) ^ bool(uuid),
-           "Must specify exactly one of 'name', 'uuid'")
+    assert bool(name) ^ bool(uuid), \
+           "Must specify exactly one of 'name', 'uuid'"
     resp = self._get(
       "%s/containers" % self._base_path,
       params={"searchString": name or uuid,
               "searchAttributeList":
                 "container_name" if name else "container_uuid"}).json()
-    ASSERT(int(resp["metadata"]["totalEntities"]) == 1)
+    assert int(resp["metadata"]["totalEntities"]) == 1
     return resp["entities"][0]
 
   @entity_list
@@ -711,7 +702,7 @@ class PrismAPIClient(object):
     """
     Looks up available VMs, filtering on 'name' or 'uuid' if provided.
     """
-    ASSERT(not (name and uuid))
+    assert not (name and uuid)
     params = {}
     if uuid:
       return [self._get("%s/vms/%s" % (self._base_path, uuid)).json()]
@@ -834,7 +825,7 @@ class PrismAPIClient(object):
       SaltCloudExecutionFailure if the task is not created successfully.
     """
     op = str(op).lower()
-    ASSERT(op in ["on", "off"])
+    assert op in ["on", "off"]
     vm_json = self.vms_get(uuid=uuid)[0]
     if vm_json.get("powerState") == op:
       DEBUG("Skipping power op for VM '%s' already in requested state '%s'",
