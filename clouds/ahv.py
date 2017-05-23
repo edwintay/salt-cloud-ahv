@@ -33,7 +33,6 @@ Globals injected by salt
   __utils__(dict)
 """
 
-import base64
 import functools
 import json
 import logging
@@ -105,55 +104,7 @@ def _attach_vm_context(vm_):
     "vmname": vm_["name"]
   })
 
-#==============================================================================
-# cloud-init templates
-#==============================================================================
 
-# ifcfg-<DEVICE>
-IFCFG_TMPL = """DEVICE={DEVICE}
-TYPE=Ethernet
-DEFROUTE=yet
-ONBOOT=yes
-IPV4_FAILURE_FATAL=yes
-IPV6INIT=no
-NM_CONTROLLED=no
-BOOTPROTO=static
-DNS1={DNS_1}
-DNS2={DNS_2}
-IPADDR={IPADDR}
-NETMASK={NETMASK}
-GATEWAY={GATEWAY}
-SEARCH="{DOMAIN}"
-"""
-
-
-CLOUD_INIT_TMPL = """#cloud-config
-hostname: {HOSTNAME}
-fqdn: {FQDN}
-manage_etc_hosts: True
-
-write_files:
-  - encoding: b64
-    content: {CONTENT}
-    owner: root:root
-    path: /etc/sysconfig/network-scripts/ifcfg-{DEVICE}
-    permissions: 0644
-
-bootcmd:
-  - [ ifdown, {DEVICE}, down ]
-  - [ ifup, {DEVICE}, up ]
-
-cloud_init_modules:
-  - write_files
-  - bootcmd
-  - set_hostname
-  - update_etc_hosts
-
-cloud_config_modules: []
-
-cloud_final_modules:
-  - final_message
-"""
 
 #==============================================================================
 # Salt entities
@@ -459,28 +410,7 @@ class AhvVmCreateSpec(object):
     self.container_uuid = ctr_json["containerUuid"]
 
   def inject_network_script(self, device, vm_):
-    net_json = vm_["network"].values()
-    assert len(net_json) == 1, \
-           "Currently multiple network interfaces are not supported"
-    net_json = net_json[0]
-
-    ifcfg = IFCFG_TMPL.format(**{
-      "DEVICE": device,
-      "DNS_1": vm_["dns_servers"][0],
-      "DNS_2": vm_["dns_servers"][1],
-      "DOMAIN": net_json["domain"],
-      "NETMASK": net_json["subnet_mask"],
-      "GATEWAY": net_json["gateway"],
-      "IPADDR": net_json["ip"]
-    })
-
-
-    self._cloud_init_config = CLOUD_INIT_TMPL.format(**{
-      "CONTENT": base64.b64encode(ifcfg),
-      "DEVICE": device,
-      "HOSTNAME": vm_.get("hostname", vm_["name"]),
-      "FQDN": "%s.eng.nutanix.com" % vm_.get("hostname", vm_["name"])
-    })
+    self._cloud_init_config = ""
 
   def add_network(self, uuid):
     self.vm_nics.append(AhvVmNicSpec(uuid))
