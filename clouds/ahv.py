@@ -33,7 +33,6 @@ Globals injected by salt
   __utils__(dict)
 """
 
-# pylint: disable=unused-argument
 import base64
 import functools
 import json
@@ -50,26 +49,27 @@ from salt.exceptions import (
 import salt.config
 import salt.utils.cloud
 
-
 __virtualname__ = "ahv"
 
+# Start logging
+logger = logging.getLogger(__name__)
 
-_LOG = logging.getLogger("ahv")
+class VmContextAdapter(logging.LoggerAdapter):
+  def process(self, msg, kwargs):
+    msg, kwargs = super(VmContextAdapter, self).process(msg, kwargs)
+    msg = "{}: {}".format(self.extra.get("vmname"), msg)
+    return msg, kwargs
 
-DEBUG = _LOG.debug
-INFO = _LOG.info
-WARNING = _LOG.warning
-ERROR = _LOG.error
-
-def _get_log_adapter(vm_):
-  adapter = logging.LoggerAdapter(_LOG, {"instance_name": vm_["name"]})
-  return adapter.debug, adapter.info, adapter.warning, adapter.error
+def _attach_vm_context(vm_):
+  return VmContextAdapter(logger, {
+    "vmname": vm_["name"]
+  })
 
 try:
   import requests
   _HAS_REQUESTS = True
 except ImportError as exc:
-  ERROR("Unable to import 'requests': %s", exc)
+  log.error("Unable to import 'requests': %s", exc)
   _HAS_REQUESTS = False
 
 #==============================================================================
@@ -129,7 +129,7 @@ cloud_final_modules:
 class SaltEvent(object):
   @classmethod
   def _fire(cls, event, path, vm_):
-    DEBUG("Firing %s event for %s", event, vm_["name"])
+    logger.debug("Firing %s event for %s" % (event, vm_["name"]))
     __utils__["cloud.fire_event"](
       "event", event, path.format(vm_["name"]),
       args=cls.generate_event_args(vm_),
@@ -420,9 +420,8 @@ class AhvVmCreateSpec(object):
     try:
       ctr_json = conn.container_get(name=self._container_name)
     except AssertionError:
-      raise SaltCloudNotFound(
-        "Unable to locate requested container %s for VM %s",
-        self._container_name, self.name)
+      raise SaltCloudNotFound("Unable to locate container %s for VM %s" %
+        (self._container_name, self.name))
 
     self.container_uuid = ctr_json["containerUuid"]
 
@@ -527,8 +526,8 @@ class PrismAPIClient(object):
           return task_uuid
 
         timeout_secs = kwargs.get("timeout_secs", 60)
-        DEBUG("Blocking on task '%s' (timeout: %s seconds)",
-              task_uuid, timeout_secs)
+        logger.debug("Blocking on task '%s' (timeout: %s seconds)" %
+          (task_uuid, timeout_secs))
         success, resp_json = self.poll_progress_monitor(
           task_uuid, timeout_secs=timeout_secs)
         if kwargs.get("raise_on_error", True) and not success:
@@ -623,14 +622,14 @@ class PrismAPIClient(object):
   def poll_progress_monitor(self, uuid, timeout_secs=60):
     deadline_secs = time.time() + timeout_secs
     while time.time() < deadline_secs:
-      DEBUG("Waiting on task '%s'", uuid)
+      logger.debug("Waiting on task '%s'" % uuid)
       resp = self.progress_monitors_get(uuid=uuid)
       assert len(resp) == 1
       pct_complete = int(resp[0].get("percentageCompleted", 0))
       if pct_complete == 100:
         return str(resp[0].get("status")).lower(), resp[0]
 
-      DEBUG("Task in progress: %s", resp[0].get("status"))
+      logger.debug("Task in progress: %s" % resp[0].get("status"))
 
       time.sleep(1)
 
@@ -780,7 +779,7 @@ class PrismAPIClient(object):
       timeout_secs: (None|int): Optional. If a positive integer, the maximum
         time to wait on the task in seconds. Otherwise, no timeout is set.
     """
-    DEBUG("Polling task '%s' with timeout %s", uuid, timeout_secs)
+    logger.debug("Polling task '%s' with timeout %s", uuid, timeout_secs)
     params = {}
     if timeout_secs and timeout_secs > 0:
       params["timeoutseconds"] = timeout_secs
@@ -828,8 +827,8 @@ class PrismAPIClient(object):
     assert op in ["on", "off"]
     vm_json = self.vms_get(uuid=uuid)[0]
     if vm_json.get("powerState") == op:
-      DEBUG("Skipping power op for VM '%s' already in requested state '%s'",
-            uuid, op)
+      logger.debug("Skipping power op for VM '%s' already in requested state "
+        "'%s'", uuid, op)
       return None
 
     return self._post("%s/vms/%s/power_op/%s" %
@@ -993,30 +992,30 @@ def create(vm_, conn=None, call=None):
   Returns:
     (dict<str,str>): Map of configuration steps to boolean success.
   """
-  DEBUG, INFO, WARNING, ERROR = _get_log_adapter(vm_)
+  logg = _attach_vm_context(vm_)
   ret = {"created": False,
          "powered on": False,
          "deployed minion": False}
-  INFO("Handling instance create...")
+  logg.info("Handling instance create...")
 
   clone_vm_uuid, vm_spec = AhvVmCreateSpec.from_salt_vm_dict(vm_, conn)
-  DEBUG("Generated VmCloneSpec: %s",
-        json.dumps(vm_spec.to_dict(), indent=2, sort_keys=True))
+  logg.debug("Generated VmCloneSpec: %s" %
+    json.dumps(vm_spec.to_dict(), indent=2, sort_keys=True))
 
-  DEBUG("Issuing CloneVM request to Prism...")
+  logg.debug("Issuing CloneVM request to Prism...")
   SaltRequestingEvent.fire(vm_)
   task_json = conn.vms_clone(clone_vm_uuid, vm_spec)
-  DEBUG("VM clone task complete")
-  INFO("VM created")
+  logg.debug("VM clone task complete")
+  logg.info("VM created")
   ret["created"] = True
 
   if not vm_.get("power_on"):
     return ret
 
-  INFO("Powering on VM")
+  logg.info("Powering on VM")
   vm_uuid = task_json["entityId"][0]
   conn.vms_power_op(vm_uuid, "on")
-  INFO("VM powered on successfully")
+  logg.info("VM powered on successfully")
   ret["powered on"] = True
 
   if not vm_.get("deploy"):
@@ -1024,42 +1023,43 @@ def create(vm_, conn=None, call=None):
 
   SaltDeployingEvent.fire(vm_)
   # TODO (jklein): Cap waiting at something.
-  INFO("Waiting for VM to acquire IP...")
+  logg.info("Waiting for VM to acquire IP...")
   t0 = time.time()
   while True:
-    DEBUG("Waiting for VM to acquire IP...%d seconds", time.time() - t0)
+    logg.debug("Waiting for VM to acquire IP...%d seconds", time.time() - t0)
     vm_json = conn.vms_get(name=vm_["name"])[0]
     if vm_json["ipAddresses"]:
-      INFO("Acquired IP: %s", vm_json["ipAddresses"])
+      logg.info("Acquired IP: %s" % vm_json["ipAddresses"])
       vm_["ssh_host"] = vm_json["ipAddresses"][0]
       break
 
     time.sleep(1)
 
-  INFO("Detaching cloud-init customization CD...")
+  logg.info("Detaching cloud-init customization CD...")
   conn.remove_cloud_init_cd(vm_uuid)
-  INFO("Detached cloud-init customization CD")
+  logg.info("Detached cloud-init customization CD")
 
   # TODO (jklein): Cap waiting at something.
-  INFO("Waiting for VM to acquire IP...")
+  logg.info("Waiting for VM to acquire IP...")
   t0 = time.time()
   while True:
-    DEBUG("Waiting for VM to acquire IP...%d seconds", time.time() - t0)
+    logg.debug("Waiting for VM to acquire IP...%d seconds",
+      time.time() - t0)
     vm_json = conn.vms_get(name=vm_["name"])[0]
     if vm_json["ipAddresses"]:
-      INFO("Acquired IP: %s", vm_json["ipAddresses"])
+      logg.info("Acquired IP: %s" % vm_json["ipAddresses"])
       vm_["ssh_host"] = vm_json["ipAddresses"][0]
       if vm_["ssh_host"] == vm_["network"].values()[0]["ip"]:
         break
       else:
-        ERROR("Incorrect IP detected: %s", vm_["ssh_host"])
+        logg.error("Incorrect IP detected: %s" % vm_["ssh_host"])
 
     time.sleep(1)
 
-  INFO("Bootstrapping salt...")
+  logg.info("Bootstrapping salt...")
   SaltWaitingForSSHEvent.fire(vm_)
   __utils__["cloud.bootstrap"](vm_, __opts__)
-  INFO("Bootstrap complete!")
+  logg.info("Bootstrap complete!")
   ret["deployed minion"] = True
   return ret
 
@@ -1083,15 +1083,15 @@ def destroy(vm_name, conn=None, call=None):
     SaltCloudNotFound if unable to locate a matching VM, or if 'name' does
       not uniquely identify the VM.
   """
-  DEBUG, INFO, WARNING, ERROR = _get_log_adapter({"name": vm_name})
-  INFO("Handling instance destroy...")
+  logg = _attach_vm_context({"name": vm_name})
+  logg.info("Handling instance destroy...")
   vm_json = get_entity_by_key(conn.vms_get(name=vm_name), "vmName", vm_name)
   task_uuid = conn.vms_delete(vm_json["uuid"])
-  DEBUG("Created VM Delete task")
+  logg.debug("Created VM Delete task")
   if not conn.tasks_poll(task_uuid):
     raise SaltCloudException("Deletion task failed for VM '%s'" % vm_name)
 
-  INFO("Deleted VM")
+  logg.info("Deleted VM")
   return {"message": "Successfully deleted"}
 
 
