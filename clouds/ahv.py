@@ -40,19 +40,55 @@ import logging
 import time
 import urllib
 
+# pylint: disable=import-error
 from salt.exceptions import (
   SaltCloudException,
   SaltCloudExecutionFailure,
   SaltCloudExecutionTimeout,
   SaltCloudSystemExit,
   SaltCloudNotFound)
-import salt.config
+import salt.config as config
 import salt.utils.cloud
 
-__virtualname__ = "ahv"
+try:
+  import requests
+  HAS_REQUESTS = True
+except ImportError:
+  HAS_REQUESTS = False
+# pylint: enable=import-error
+
 
 # Start logging
 logger = logging.getLogger(__name__)
+
+
+__virtualname__ = "ahv"
+
+def __virtual__():
+  if get_configured_provider() is False:
+    return False
+
+  if get_dependencies() is False:
+    return False
+
+  return __virtualname__
+
+def get_configured_provider():
+  return config.is_provider_configured(
+    __opts__,
+    __active_provider_name__ or __virtualname__,
+    required_keys=("user", "password", "prism_ip")
+  )
+
+def get_dependencies():
+  deps = {
+    'requests': HAS_REQUESTS
+  }
+  return config.check_driver_dependencies(
+    __virtualname__,
+    deps
+  )
+
 
 class VmContextAdapter(logging.LoggerAdapter):
   def process(self, msg, kwargs):
@@ -64,13 +100,6 @@ def _attach_vm_context(vm_):
   return VmContextAdapter(logger, {
     "vmname": vm_["name"]
   })
-
-try:
-  import requests
-  _HAS_REQUESTS = True
-except ImportError as exc:
-  log.error("Unable to import 'requests': %s", exc)
-  _HAS_REQUESTS = False
 
 #==============================================================================
 # cloud-init templates
@@ -860,18 +889,6 @@ class PrismAPIClient(object):
 #==============================================================================
 # Utils
 #==============================================================================
-
-def get_configured_provider():
-  return salt.config.is_provider_configured(
-    __opts__, __active_provider_name__ or __virtualname__,
-    required_keys=("user", "password", "prism_ip"))
-
-
-def get_dependencies():
-  return salt.config.check_driver_dependencies(__virtualname__,
-                                               {"requests": _HAS_REQUESTS})
-
-
 def get_conn():
   conf = get_configured_provider()
   return PrismAPIClient(conf["prism_ip"], conf["user"], conf["password"])
@@ -970,13 +987,6 @@ def fire_start_end_events(start_event, end_event):
 #==============================================================================
 # Salt cloud driver interface
 #==============================================================================
-
-def __virtual__():
-  if not (get_configured_provider() and get_dependencies()):
-    return False
-  return __virtualname__
-
-
 @fire_start_end_events(SaltCreatingEvent, SaltCreatedEvent)
 @conn_in
 def create(vm_, conn=None, call=None):
