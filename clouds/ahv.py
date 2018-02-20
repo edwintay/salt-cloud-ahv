@@ -904,29 +904,9 @@ def conn_in(func):
   return _conn_in
 
 
-def fire_start_end_events(start_event, end_event):
-  """
-  Returns:
-    (callable) A decorator which fires 'start_event'/'end_event' before/after
-      the wrapped function.
-  """
-  def fire_start_end_events_decorator(func):
-    def _wrapped(vm_, *args, **kwargs):
-      _vm_ = vm_
-      if isinstance(vm_, basestring):
-        vm_ = {"name": vm_}
-      start_event.fire(vm_)
-      ret = func(_vm_, *args, **kwargs)
-      end_event.fire(vm_)
-      return ret
-
-    return _wrapped
-  return fire_start_end_events_decorator
-
 #==============================================================================
 # Salt cloud driver interface
 #==============================================================================
-@fire_start_end_events(SaltCreatingEvent, SaltCreatedEvent)
 @conn_in
 def create(vm_, conn=None, call=None):
   """
@@ -941,6 +921,8 @@ def create(vm_, conn=None, call=None):
   Returns:
     (dict<str,str>): Map of configuration steps to boolean success.
   """
+  SaltCreatingEvent.fire(vm_)
+
   logg = _attach_vm_context(vm_)
   ret = {"created": False,
          "powered on": False,
@@ -959,6 +941,7 @@ def create(vm_, conn=None, call=None):
   ret["created"] = True
 
   if not vm_.get("power_on"):
+    SaltCreatedEvent.fire(vm_)
     return ret
 
   logg.info("Powering on VM")
@@ -968,6 +951,7 @@ def create(vm_, conn=None, call=None):
   ret["powered on"] = True
 
   if not vm_.get("deploy"):
+    SaltCreatedEvent.fire(vm_)
     return ret
 
   SaltDeployingEvent.fire(vm_)
@@ -1010,11 +994,12 @@ def create(vm_, conn=None, call=None):
   __utils__["cloud.bootstrap"](vm_, __opts__)
   logg.info("Bootstrap complete!")
   ret["deployed minion"] = True
+
+  SaltCreatedEvent.fire(vm_)
   return ret
 
 
 @conn_in
-@fire_start_end_events(SaltDestroyingEvent, SaltDestroyedEvent)
 def destroy(vm_name, conn=None, call=None):
   """
   Destroys VM 'vm_name'.
@@ -1032,6 +1017,8 @@ def destroy(vm_name, conn=None, call=None):
     SaltCloudNotFound if unable to locate a matching VM, or if 'name' does
       not uniquely identify the VM.
   """
+  SaltDestroyingEvent.fire(vm_name)
+
   logg = _attach_vm_context({"name": vm_name})
   logg.info("Handling instance destroy...")
   vm_json = get_entity_by_key(conn.vms_get(name=vm_name), "vmName", vm_name)
@@ -1041,6 +1028,7 @@ def destroy(vm_name, conn=None, call=None):
     raise SaltCloudException("Deletion task failed for VM '%s'" % vm_name)
 
   logg.info("Deleted VM")
+  SaltDestroyedEvent.fire(vm_name)
   return {"message": "Successfully deleted"}
 
 
