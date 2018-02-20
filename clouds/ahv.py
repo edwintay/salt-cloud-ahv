@@ -1,19 +1,36 @@
-#
-# Copyright (c) 2017 Nutanix Inc. All rights reserved.
-#
-# Author: jklein@nutanix.com
-#
+#!/usr/bin/env python
 """
-Salt cloud driver module for Acropolis.
+Copyright (c) 2017 Nutanix Inc. All rights reserved.
 
-Installation:
-  Add 'ahv.py' to an existing salt extension_modules directory, or set
-  'extension_modules' to point to this project's root directory.
+.. versionadded: 2016.3.4
 
-Globals (injected by salt):
+:codeauthor: Jason Klein <jklein@nutanix.com>
+:codeauthor: Edwin Tay <edwin@nutanix.com>
+
+
+
+Nutanix AHV Module
+==================
+The Nutanix AHV module allows you to interface with a Nutanix AHV cluster to
+perform simple CRUD of guest VMs.
+
+:depends: requests >= 2.6.0
+
+To use this module, set up the AHV cluster configuration at
+``/etc/salt/cloud.providers`` or
+``/etc/salt/cloud.providers.d/ahv.conf``:
+
+
+
+Developer Notes
+===============
+Globals injected by salt
+
+.. code-block:: python
+
   __active_provider_name__ (str)
   __opts__ (dict)
-  __utils__
+  __utils__(dict)
 """
 
 # pylint: disable=unused-argument
