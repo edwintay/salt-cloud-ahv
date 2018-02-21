@@ -106,114 +106,99 @@ def _attach_vm_context(vm_):
 
 
 
-#==============================================================================
-# Salt entities
-#==============================================================================
 
-class SaltEvent(object):
-  @classmethod
-  def _fire(cls, event, path, vm_):
-    logger.debug("Firing %s event for %s" % (event, vm_["name"]))
+
+#=============================================================================
+# event helpers
+#=============================================================================
+class Event(object):
+  message_fmt = "some-event-message"
+  tag_fmt = "some-event-tag"
+  default_payload = tuple()
+
+  def __init__(self, data):
+    self.args = self.extract_args(data)
+    self.sock_dir = __opts__["sock_dir"]
+    self.transport = __opts__["transport"]
+
+  def fire(self):
     __utils__["cloud.fire_event"](
-      "event", event, path.format(vm_["name"]),
-      args=cls.generate_event_args(vm_),
-      sock_dir=__opts__["sock_dir"], transport=__opts__["transport"])
+      "event",
+      self.message_fmt.format(**self.args),
+      self.tag_fmt.format(**self.args),
+      args=self.args,
+      sock_dir=self.sock_dir,
+      transport=self.transport
+    )
 
-  @classmethod
-  def generate_event_args(cls, vm_):
-    raise NotImplementedError("Subclasses must implement this")
+  def extract_args(self, data):
+    basetag = self.tag_fmt.split("/")[-1]
+    payload = self.default_payload
+    args = __utils__["cloud.filter_event"](basetag, data, payload)
+    return args
 
-  @classmethod
-  def get_event(cls):
-    raise NotImplementedError("Subclasses must implement this")
+class CreatingInstanceEvent(Event):
+  message_fmt = "creating instance"
+  tag_fmt = "salt/cloud/{name}/creating"
+  default_payload = ("name", "profile", "provider", "driver")
 
-  @classmethod
-  def get_event_text(cls):
-    return "%s_instance" % cls.get_event()
+class RequestingInstanceEvent(Event):
+  message_fmt = "requesting instance"
+  tag_fmt = "salt/cloud/{name}/requesting"
+  default_payload = ("name", "image", "size", "location")
 
-  @classmethod
-  def get_event_path(cls):
-    return "salt/cloud/{0}/%s" % cls.get_event()
+class QueryingInstanceEvent(Event):
+  message_fmt = "querying instance"
+  tag_fmt = "salt/cloud/{name}/querying"
+  default_payload = ("name", "instance_id")
 
-  @classmethod
-  def fire(cls, vm_):
-    cls._fire(cls.get_event_text(), cls.get_event_path(), vm_)
+  def extract_args(self, data):
+    data["instance_id"] = data.get("name")
+    return super(QueryingInstanceEvent, self).extract_args(data)
 
+class WaitingForSshInstanceEvent(Event):
+  message_fmt = "waiting for ssh"
+  tag_fmt = "salt/cloud/{name}/waiting_for_ssh"
+  default_payload = ("ip_address",)
 
-class SaltCreatingEvent(SaltEvent):
-  @classmethod
-  def generate_event_args(cls, vm_):
-    return {"name": vm_["name"],
-            "profile": vm_["profile"],
-            "provider": vm_["driver"]}
+  def extract_args(self, data):
+    data["ip_address"] = data.get("ssh_host")
+    return super(WaitingForSshInstanceEvent, self).extract_args(data)
 
-  @classmethod
-  def get_event(cls):
-    return "creating"
+class CreatedInstanceEvent(Event):
+  message_fmt = "created instance"
+  tag_fmt = "salt/cloud/{name}/created"
+  default_payload = ("name", "profile", "provider", "driver")
 
+class DestroyingInstanceEvent(Event):
+  message_fmt = "destroying instance"
+  tag_fmt = "salt/cloud/{name}/destroying"
+  default_payload = ("name",)
 
-class SaltRequestingEvent(SaltEvent):
-  @classmethod
-  def generate_event_args(cls, vm_):
-    return {"kwargs": vm_}
+  def extract_args(self, name):
+    data = {
+      "name": name,
+      "instance_id": name
+    }
+    return super(DestroyingInstanceEvent, self).extract_args(data)
 
-  @classmethod
-  def get_event(cls):
-    return "requesting"
+class DestroyedInstanceEvent(Event):
+  message_fmt = "destroyed instance"
+  tag_fmt = "salt/cloud/{name}/destroyed"
+  default_payload = ("name",)
 
-
-class SaltWaitingForSSHEvent(SaltEvent):
-  @classmethod
-  def generate_event_args(cls, vm_):
-    return {"ip_address": vm_["ssh_host"]}
-
-  @classmethod
-  def get_event(cls):
-    return "waiting_for_ssh"
-
-  @classmethod
-  def get_event_text(cls):
-    return "waiting_for_ssh"
-
-
-class SaltDeployingEvent(SaltEvent):
-  @classmethod
-  def generate_event_args(cls, vm_):
-    return {"kwargs": vm_}
-
-  @classmethod
-  def get_event(cls):
-    return "deploying"
-
-
-class SaltCreatedEvent(SaltEvent):
-  generate_event_args = SaltCreatingEvent.generate_event_args
-
-  @classmethod
-  def get_event(cls):
-    return "created"
+  def extract_args(self, name):
+    data = {
+      "name": name,
+      "instance_id": name
+    }
+    return super(DestroyedInstanceEvent, self).extract_args(data)
 
 
-class SaltDestroyingEvent(SaltEvent):
-  @classmethod
-  def generate_event_args(cls, vm_name):
-    return {"kwargs": {"vm_": vm_name}}
 
-  @classmethod
-  def get_event(cls):
-    return "destroying"
-
-
-class SaltDestroyedEvent(SaltEvent):
-  @classmethod
-  def generate_event_args(cls, vm_name):
-    return {"kwargs": {"vm_": vm_name}}
-
-  @classmethod
-  def get_event(cls):
-    return "destroyed"
-
-
+#=============================================================================
+# salt entities
+#=============================================================================
 # TODO (jklein): Clean this up too...
 class SaltVm(object):
   __KEYS__ = ("id", "image", "size", "state", "private_ips", "public_ips")
@@ -879,8 +864,7 @@ def create(vm_, call=None):
   Returns:
     (dict<str,str>): Map of configuration steps to boolean success.
   """
-  SaltCreatingEvent.fire(vm_)
-
+  CreatingInstanceEvent(vm_).fire()
   conn = get_conn()
 
   logg = _attach_vm_context(vm_)
@@ -894,14 +878,16 @@ def create(vm_, call=None):
     json.dumps(vm_spec.to_dict(), indent=2, sort_keys=True))
 
   logg.debug("Issuing CloneVM request to Prism...")
-  SaltRequestingEvent.fire(vm_)
+  RequestingInstanceEvent(vm_).fire()
   task_json = conn.vms_clone(clone_vm_uuid, vm_spec)
   logg.debug("VM clone task complete")
+
+  QueryingInstanceEvent(vm_).fire()
   logg.info("VM created")
   ret["created"] = True
 
   if not vm_.get("power_on"):
-    SaltCreatedEvent.fire(vm_)
+    CreatedInstanceEvent(vm_).fire()
     return ret
 
   logg.info("Powering on VM")
@@ -910,11 +896,7 @@ def create(vm_, call=None):
   logg.info("VM powered on successfully")
   ret["powered on"] = True
 
-  if not vm_.get("deploy"):
-    SaltCreatedEvent.fire(vm_)
-    return ret
-
-  SaltDeployingEvent.fire(vm_)
+  WaitingForSshInstanceEvent(vm_).fire()
   # TODO (jklein): Cap waiting at something.
   logg.info("Waiting for VM to acquire IP...")
   t0 = time.time()
@@ -949,13 +931,16 @@ def create(vm_, call=None):
 
     time.sleep(1)
 
+  if not vm_.get("deploy"):
+    CreatedInstanceEvent(vm_).fire()
+    return ret
+
   logg.info("Bootstrapping salt...")
-  SaltWaitingForSSHEvent.fire(vm_)
   __utils__["cloud.bootstrap"](vm_, __opts__)
   logg.info("Bootstrap complete!")
   ret["deployed minion"] = True
 
-  SaltCreatedEvent.fire(vm_)
+  CreatedInstanceEvent(vm_).fire()
   return ret
 
 
@@ -975,7 +960,7 @@ def destroy(vm_name, call=None):
     SaltCloudNotFound if unable to locate a matching VM, or if 'name' does
       not uniquely identify the VM.
   """
-  SaltDestroyingEvent.fire(vm_name)
+  DestroyingInstanceEvent(vm_name).fire()
 
   conn = get_conn()
 
@@ -988,7 +973,7 @@ def destroy(vm_name, call=None):
     raise SaltCloudException("Deletion task failed for VM '%s'" % vm_name)
 
   logg.info("Deleted VM")
-  SaltDestroyedEvent.fire(vm_name)
+  DestroyedInstanceEvent(vm_name).fire()
   return {"message": "Successfully deleted"}
 
 
