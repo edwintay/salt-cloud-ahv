@@ -859,32 +859,36 @@ def _filter_arguments(kwargs):
 # Salt cloud driver interface
 #==============================================================================
 def create(vm_, call=None):
+  CreatingInstanceEvent(vm_).fire()
   conn = get_conn(version=3)
+  result = {
+    "created": False,
+    "powered": False,
+    "bootstrapped": False
+  }
 
   logg = _attach_vm_context(vm_)
-  ret = {
-    "created": False,
-    "powered on": False,
-    "deployed minion": False
-  }
-  logg.info("Handling instance create...")
+  logg.info("Creating instance ...")
 
   vm_name = vm_["name"]
   ipaddr = vm_["network"].values()[0]["ip"]
 
-  logg.debug("Issuing CloneVM request to Prism...")
+  logg.debug("Requesting Prism clone_vm ...")
+  RequestingInstanceEvent(vm_).fire()
+  QueryingInstanceEvent(vm_).fire()
   task_json = conn.clone_vm(
     vm_name=vm_name,
     vm_ip=ipaddr,
     size_mem_mib=2048,
     num_vcpus=2
   )
-  logg.debug("VM clone task complete")
+  logg.debug("VM clone complete")
 
   logg.info("VM created")
-  ret["created"] = True
+  result["created"] = True
+  CreatedInstanceEvent(vm_).fire()
 
-  return ret
+  return result
 
 def _create(vm_, call=None):
   """
