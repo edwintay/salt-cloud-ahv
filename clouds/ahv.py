@@ -859,14 +859,63 @@ def _filter_arguments(kwargs):
 #==============================================================================
 # Salt cloud driver interface
 #==============================================================================
+def is_profile_configured(opts, provider, profile, vm_=None):
+  required_keys = [
+    "provider",
+    "clone_from",
+    "os_family",
+    "num_vcpus",
+    "num_cores_per_vcpu",
+    "memory_size_mib"
+  ]
+
+  alias, driver = provider.split(":")
+  provider_key = opts["providers"][alias][driver]
+  profile_key = opts["providers"][alias][driver]["profiles"][profile]
+
+  # Check if required fields are supplied in the provider config. If they
+  # are present, remove it from the required_keys list.
+  for item in list(required_keys):
+    if item in provider_key:
+      required_keys.remove(item)
+
+  # If a vm_ dict was passed in, use that information to get any other configs
+  # that we might have missed thus far, such as a option provided in a map file.
+  if vm_:
+    for item in list(required_keys):
+      if item in vm_:
+        required_keys.remove(item)
+
+  # Check for remaining required parameters in the profile config.
+  for item in required_keys:
+    if profile_key.get(item, None) is None:
+      # There's at least one required configuration item which is not set.
+      logger.error(
+        "The required '{0}' configuration setting is missing from "
+        "the '{1}' profile, which is configured under the '{2}' "
+        'alias.'.format(item, profile, alias)
+      )
+      return False
+
+  return True
+
+
+
 def create(vm_, call=None):
-  CreatingInstanceEvent(vm_).fire()
-  conn = get_conn(version=3)
   result = {
     "created": False,
     "powered": False,
     "bootstrapped": False
   }
+
+  if vm_["profile"] and not is_profile_configured(__opts__,
+      __active_provider_name__ or __virtualname__,
+      vm_["profile"],
+      vm_=vm_):
+    return result
+
+  CreatingInstanceEvent(vm_).fire()
+  conn = get_conn(version=3)
 
   logg = _attach_vm_context(vm_)
   logg.info("Creating instance ...")
