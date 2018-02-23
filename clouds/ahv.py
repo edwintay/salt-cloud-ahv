@@ -887,7 +887,8 @@ def create(vm_, call=None):
     vm_name=vm_name,
     vm_ip=ipaddr,
     size_mem_mib=2048,
-    num_vcpus=2
+    num_vcpus=2,
+    power_on=vm_["power_on"]
   )
   logg.debug("VM clone complete")
 
@@ -1382,7 +1383,15 @@ class AplosClient(object):
   # =========================================================================
   # commands
   # =========================================================================
-  def clone_vm(self, cluster_uuid, clone_from, os_family, vm_name, vm_ip, size_mem_mib, num_vcpus):
+  def clone_vm(self,
+      cluster_uuid,
+      clone_from,
+      os_family,
+      vm_name,
+      vm_ip,
+      size_mem_mib,
+      num_vcpus,
+      power_on=True):
     logger.info("Looking for template {}".format(clone_from))
     status, result = self.get_vm_by_name(clone_from)
     if status >= 300:
@@ -1393,7 +1402,16 @@ class AplosClient(object):
     template_vm = AplosVmStatus.from_dict(result)
     logger.info("Cloning VM from template {}".format(template_vm.name))
 
-    status, result = self.create_vm(cluster_uuid, template_vm, os_family, vm_name, vm_ip, size_mem_mib, num_vcpus)
+    status, result = self.create_vm(
+      cluster_uuid,
+      template_vm,
+      os_family,
+      vm_name,
+      vm_ip,
+      size_mem_mib,
+      num_vcpus,
+      power_on
+    )
     if str(status) == "408":
       logger.error(json.dumps(result.get("message_list"), indent=2))
       return False
@@ -1452,7 +1470,8 @@ class AplosClient(object):
       name,
       ip,
       size_mem_mib,
-      num_vcpus):
+      num_vcpus,
+      power_on=True):
     userdata = CLOUDINIT_MAP.get(os_family).replace("<desired-ip>", ip).replace("<desired-hostname>", name)
     metadata = json.dumps({
       "uuid": name,
@@ -1460,6 +1479,10 @@ class AplosClient(object):
         "config": "disabled"
       }
     })
+
+    power_state = "OFF"
+    if power_on:
+      power_state = "ON"
 
     spec = {
       "name": name,
@@ -1480,7 +1503,7 @@ class AplosClient(object):
             }
           }
         ],
-        "power_state": "ON",
+        "power_state": power_state,
         "num_sockets": int(num_vcpus),
         "num_vcpus_per_socket": 1,
         "memory_size_mib": int(size_mem_mib),
