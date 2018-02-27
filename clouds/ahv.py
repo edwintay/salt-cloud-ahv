@@ -952,11 +952,10 @@ def create(vm_, call=None):
     return dict(result)
 
   # Reboot VM for cloudinit
-  vm_ip = nics.values()[0]["ip"]
-  vm_data = conn.reboot_for_cloudinit(vm_ip,
+  vm_data = conn.reboot_for_cloudinit(
+    vm_data,
     vm_["ssh_username"],
-    vm_["password"],
-    vm_data
+    vm_["password"]
   )
   if not vm_data:
     logg.error("Failed to reboot for cloudinit")
@@ -1510,6 +1509,33 @@ class AplosUtil(object):
     return False
 
   @classmethod
+  def has_ip_endpoints(klass, status, result):
+    if result and status == 200:
+      nic_list = defaultdict(dict, result)["status"]["resources"].get("nic_list", [])
+      ip_set = klass.extract_ips(nic_list)
+      return ip_set
+    return False
+
+  @staticmethod
+  def extract_ips(nic_list):
+    ip_set = set()
+    for nic in nic_list:
+      for endpoint in nic.get("ip_endpoint_list", []):
+        ip_set.add(endpoint.get("ip"))
+    return ip_set
+
+  @classmethod
+  def wait_until_complete(klass,
+    init_fn,
+    status_fn,
+    completed_fn,
+    retries=100,
+    wait_secs=3):
+
+    (status, result) = init_fn()
+    return klass.track_request(status, result, status_fn, completed_fn=completed_fn)
+
+  @classmethod
   def track_request(klass,
       status,
       result,
@@ -1538,8 +1564,8 @@ class AplosUtil(object):
         logger.info("Time to completion (seconds): {:.2f}".format(time_taken))
         return result
 
-      (status, result) = status_fn(uuid)
       time.sleep(status_wait_secs)
+      (status, result) = status_fn(uuid)
 
     klass.print_failure(result)
     return None
@@ -1816,7 +1842,7 @@ class AplosClient(object):
     status, result = self.PUT(endpoint=endpoint, body=body)
     return status, result
 
-  def reboot_for_cloudinit(self, vm_host, ssh_username, ssh_password, vm_data):
+  def reboot_for_cloudinit(self, vm_data, ssh_username, ssh_password):
     logger.info("Powering on VM to initiate cloudinit")
     spec = AplosVmSpec.from_dict(vm_data)
     spec.power_state = APLOS_POWER_STATE_ON
@@ -1843,10 +1869,29 @@ class AplosClient(object):
       return
 
     start_time = time.time()
+    # Extract ip from vm status
+    logger.info("Waiting for VM to acquire IP ...")
+    vm_data = AplosUtil.wait_until_complete(
+      init_fn=lambda: self.get_vm_by_uuid(spec.uuid),
+      status_fn=self.get_vm_by_uuid,
+      completed_fn=AplosUtil.has_ip_endpoints
+    )
+    if not vm_data:
+      return
+
+    ip_list = list(AplosUtil.extract_ips(
+      defaultdict(dict, vm_data)["status"]["resources"]["nic_list"]
+    ))
+    if not ip_list:
+      logger.error("Failed to configure network for {}".format(spec.uuid))
+      return
+    vm_ip = ip_list[0]
+    logger.info("VM {} has IP {}".format(spec.uuid, vm_ip))
+
     # Give cloudinit time to execute. We estimate boot-up is done when sshd
     # starts accepting connections
     logger.info("Waiting for cloudinit ...")
-    salt.utils.cloud.wait_for_passwd(vm_host,
+    salt.utils.cloud.wait_for_passwd(vm_ip,
       username=ssh_username,
       password=ssh_password,
       maxtries=1
