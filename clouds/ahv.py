@@ -1842,13 +1842,28 @@ class AplosClient(object):
       AplosUtil.print_failure(result)
       return
 
-    logger.info("Waiting for SSH")
+    start_time = time.time()
+    # Give cloudinit time to execute. We estimate boot-up is done when sshd
+    # starts accepting connections
+    logger.info("Waiting for cloudinit ...")
     salt.utils.cloud.wait_for_passwd(vm_host,
       username=ssh_username,
       password=ssh_password,
       maxtries=1
     )
-    logger.info("SSH initialized")
+    logger.info("Done with cloudinit")
+    # The changes done by cloudinit are not recorded by AHV if we modify the
+    # disks too soon after, so we have to wait for AHV to catch up if
+    # necessary
+    # TODO: Report this AHV bug
+    minimum_delay = 30 # seconds
+    time_elapsed = time.time() - start_time
+    remaining_delay = minimum_delay - time_elapsed
+    if remaining_delay > 0:
+      logger.info("Waiting {:.2f} seconds for cloudinit changes to be "
+        "saved".format(remaining_delay)
+      )
+      time.sleep(remaining_delay)
 
     # Shutdown VM and remove cloudinit disk
     logger.info("Shutting down VM and removing cloudinit disk")
