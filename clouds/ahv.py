@@ -1565,10 +1565,17 @@ class AplosUtil(object):
     status_fn,
     completed_fn,
     retries=100,
-    wait_secs=3):
+    wait_secs=3,
+    retry_message=""):
 
     (status, result) = init_fn()
-    return klass.track_request(status, result, status_fn, completed_fn=completed_fn)
+    return klass.track_request(
+      status,
+      result,
+      status_fn,
+      completed_fn=completed_fn,
+      retry_message=retry_message
+    )
 
   @classmethod
   def track_request(klass,
@@ -1577,7 +1584,8 @@ class AplosUtil(object):
       status_fn,
       status_retries=100,
       status_wait_secs=3,
-      completed_fn=None
+      completed_fn=None,
+      retry_message=""
     ):
     uuid = defaultdict(dict, result)["metadata"].get("uuid")
     if not uuid:
@@ -1594,11 +1602,17 @@ class AplosUtil(object):
         break
 
       if completed:
-        end_time = time.time()
-        time_taken = end_time - start_time
-        logger.info("Time to completion (seconds): {:.2f}".format(time_taken))
+        time_taken = time.time() - start_time
+        logger.info("Time to completion: {0} seconds".format(
+          int(time_taken)
+        ))
         return result
 
+      if retry_message:
+        time_taken = time.time() - start_time
+        logger.info("{0} ({1} seconds)".format(
+          retry_message, int(time_taken)
+        ))
       time.sleep(status_wait_secs)
       (status, result) = status_fn(uuid)
 
@@ -1902,7 +1916,8 @@ class AplosClient(object):
     vm_data = AplosUtil.wait_until_complete(
       init_fn=lambda: self.get_vm_by_uuid(spec.uuid),
       status_fn=self.get_vm_by_uuid,
-      completed_fn=AplosUtil.has_ip_endpoints
+      completed_fn=AplosUtil.has_ip_endpoints,
+      retry_message="Waiting for VM to acquire IP ..."
     )
     if not vm_data:
       return
