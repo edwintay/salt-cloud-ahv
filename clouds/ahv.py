@@ -1073,7 +1073,7 @@ def _create(vm_, call=None):
     if vm_json["ipAddresses"]:
       logg.info("Acquired IP: %s" % vm_json["ipAddresses"])
       vm_["ssh_host"] = vm_json["ipAddresses"][0]
-      if vm_["ssh_host"] == vm_["network"].values()[0]["ip"]:
+      if vm_["ssh_host"] == vm_["network"].values()[0]["ipaddr"]:
         break
       else:
         logg.error("Incorrect IP detected: %s" % vm_["ssh_host"])
@@ -1776,7 +1776,7 @@ class AplosClient(object):
       num_vcpus=2,
       num_cores_per_vcpu=1):
 
-    static_ip = defaultdict(dict, nics)["nic.0"]["ip"]
+    static_ip = defaultdict(dict, nics)["nic.0"]["ipaddr"]
     userdata = CLOUDINIT_MAP.get(os_family).replace(
         "<desired-ip>", static_ip).replace(
         "<desired-hostname>", vm_name)
