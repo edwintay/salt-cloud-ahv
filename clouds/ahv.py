@@ -305,216 +305,6 @@ class DestroyedInstanceEvent(Event):
 
 
 #==============================================================================
-# AHV entities
-#==============================================================================
-
-# TODO (jklein): Clean up this mess.
-
-class AhvVmNicSpec(object):
-  def __init__(self, uuid):
-    self.network_uuid = uuid
-
-  def to_dict(self):
-    return {
-      "networkUuid": self.network_uuid
-    }
-
-
-class AhvDiskSpec(object):
-  def __init__(self, bus_type="scsi",
-               bus_index=None, is_cdrom=False, is_empty=False):
-    self.disk_address = {"deviceBus": bus_type}
-    if bus_index is not None:
-      self.disk_address["deviceIndex"] = bus_index
-    self.is_cdrom = is_empty
-    self.is_empty = is_empty
-    self.vm_disk_clone = None
-    self.vm_disk_create = None
-
-  def to_dict(self):
-    ret = {
-      "diskAddress": self.disk_address,
-      "isCdrom": self.is_cdrom,
-      "isEmpty": self.is_empty
-    }
-    if self.vm_disk_clone:
-      ret["vmDiskClone"] = self.vm_disk_clone.to_dict()
-    elif self.vm_disk_create:
-      ret["vmDiskCreate"] = self.vm_disk_create.to_dict()
-
-    return ret
-
-
-class AhvDiskCloneSpec(object):
-  def __init__(self, vm_disk_uuid, minimum_size=1):
-    self.minimum_size = minimum_size
-    self.vm_disk_uuid = vm_disk_uuid
-
-  def to_dict(self):
-    return {
-      "minimumSize": self.minimum_size,
-      "vmDiskUuid": self.vm_disk_uuid
-    }
-
-
-class AhvDiskCreateSpec(object):
-  def __init__(self, container_uuid, size=1024**3):
-    self.container_uuid = container_uuid
-    self.size = size
-
-  def to_dict(self):
-    return {
-      "containerUuid": self.container_uuid,
-      "size": self.size
-    }
-
-
-class AhvVmCreateSpec(object):
-  __KEY_MAP__ = {
-    "memory_mb": "memoryMb",
-    "num_vcpus": "numVcpus",
-    "num_cores_per_vcpu": "numCoresPerVcpu",
-    "description": "description",
-    "vm_nics": "vmNics",
-    "vm_disks": "vmDisks",
-    "name": "name"
-  }
-
-  @classmethod
-  def from_salt_vm_dict(cls, vm_, conn):
-    # assert "name" in vm_
-    assert "container" in vm_
-
-    kwargs = {}
-
-    clone_vm_uuid = None
-    if "clonefrom_vm" in vm_:
-      clone_target_json = conn.vms_get(name=vm_["clonefrom_vm"])
-      assert len(clone_target_json) == 1
-      clone_target_json = clone_target_json[0]
-
-      for key, val in cls.__KEY_MAP__.iteritems():
-        if val in clone_target_json:
-          kwargs[key] = clone_target_json[val]
-
-      clone_vm_uuid = clone_target_json["uuid"]
-
-    # TODO (jklein): Support cloning from image service.
-    #if "clonefrom_image_service":
-    # images_map = dict((i["name"], i) for i in conn.images_get())
-    # assert vm_["clonefrom"] in images_map
-    # vm_disk_uuid = images_map[vm_["clonefrom"]]["vmDiskId"]
-    # ret = conn.virtual_disk_get(vm_disk_uuid)
-
-    for key in cls.__KEY_MAP__.iterkeys():
-      if key in vm_:
-        kwargs[key] = vm_[key]
-    kwargs["container_name"] = vm_["container"]
-    vm_spec = cls(**kwargs)
-
-    vm_spec.resolve_container(conn)
-    network_map = dict((n["name"], n) for n in conn.networks_get())
-
-    if not "clonefrom_vm" in vm_:
-      pass
-      # for vm_disk_uuid in clone_target_json["nutanixVirtualDiskUuids"]:
-      #   vm_disk_json = conn.virtual_disk_get(vm_disk_uuid)
-      #   bus_type, bus_index = vm_disk_json["diskAddress"].split(".")
-      #   vm_spec.clone_disk(vm_disk_uuid, bus_type, int(bus_index))
-
-
-    for name, spec in vm_.get("network", {}).iteritems():
-      if spec["name"] not in network_map:
-        raise SaltCloudNotFound(
-          "Unable to locate requested network '%s' for adapter '%s'" %
-          (spec["name"], name))
-      vm_spec.add_network(network_map[spec["name"]]["uuid"])
-      vm_spec.inject_network_script("eth0", vm_)
-
-    # for name, spec in vm_.get("disk", {}).iteritems():
-    #   bus_type, bus_index = name.split(".")
-    #   vm_spec.add_disk(spec["size"]*1024**3, bus_type, int(bus_index))
-
-    if False:
-    #if "clonefrom_vm" in vm_:
-      if False: #ret.get("diskAddress"):
-        # bus_type, bus_index = ret["diskAddress"].split(".")
-        # vm_spec.clone_disk(vm_disk_uuid, bus_type, int(bus_index))
-        pass
-      else:
-        #vm_spec.clone_disk(vm_disk_uuid)
-        pass
-
-    return clone_vm_uuid, vm_spec
-
-  def __init__(self, name, memory_mb=1024, num_vcpus=1,
-               num_cores_per_vcpu=1, description="", container_name=""):
-    self.description = description
-    self.memory_mb = memory_mb
-    self.name = name
-    self.num_cores_per_vcpu = num_cores_per_vcpu
-    self.num_vcpus = num_vcpus
-    self.vm_disks = []
-    self.vm_nics = []
-    self.container_uuid = None
-    self._container_name = container_name
-    self._cloud_init_config = None
-
-  def resolve_container(self, conn):
-    try:
-      ctr_json = conn.container_get(name=self._container_name)
-    except AssertionError:
-      raise SaltCloudNotFound("Unable to locate container %s for VM %s" %
-        (self._container_name, self.name))
-
-    self.container_uuid = ctr_json["containerUuid"]
-
-  def inject_network_script(self, device, vm_):
-    self._cloud_init_config = ""
-
-  def add_network(self, uuid):
-    self.vm_nics.append(AhvVmNicSpec(uuid))
-
-  def add_cdrom(self):
-    self.vm_disks.append(AhvDiskSpec("ide", is_empty=True, is_cdrom=True))
-
-  def add_disk(self, size_bytes, bus_type, bus_index):
-    assert self.container_uuid, \
-      "Cannot add disk without resolving container UUID from container name"
-    spec = AhvDiskSpec(bus_type, bus_index)
-    spec.vm_disk_create = AhvDiskCreateSpec(self.container_uuid,
-                                            size=size_bytes)
-    self.vm_disks.append(spec)
-
-  def clone_disk(self, vm_disk_uuid,
-                 bus_type="scsi", bus_index=None, minimum_size=1):
-    spec = AhvDiskSpec(bus_type, bus_index)
-    spec.vm_disk_clone = AhvDiskCloneSpec(vm_disk_uuid,
-                                          minimum_size=minimum_size)
-    self.vm_disks.append(spec)
-
-  def to_dict(self):
-    ret = {}
-    for k, v in self.__KEY_MAP__.iteritems():
-      # TODO (jklein): This is shit, clean up.
-      _v = getattr(self, k)
-      if isinstance(_v, list):
-        for ii, e in enumerate(_v):
-          if hasattr(e, "to_dict"):
-            _v[ii] = e.to_dict()
-      elif hasattr(_v, "to_dict"):
-        _v = _v.to_dict()
-      ret[v] = _v
-
-    if self._cloud_init_config:
-      ret["vmCustomizationConfig"] = {
-        "filesToInjectList": [],
-        "userdata": self._cloud_init_config
-      }
-
-    return ret
-
-#==============================================================================
 # REST API Client
 #==============================================================================
 
@@ -591,20 +381,6 @@ class LegacyClient(object):
 
     return _wrapped
 
-  def entity(func):
-    # pylint: disable=no-self-argument
-    """
-    Decorator for REST API endpoints corresponding to a collection of entities.
-    """
-    @functools.wraps(func)
-    def _wrapped(*args, **kwargs):
-      # pylint: disable=not-callable
-      try:
-        return func(*args, **kwargs).json()
-      except Exception as exc:
-        raise SaltCloudExecutionFailure(str(exc))
-    return _wrapped
-
   #============================================================================
   # Init
   #============================================================================
@@ -630,21 +406,6 @@ class LegacyClient(object):
   #============================================================================
   # Public util methods
   #============================================================================
-
-  def remove_cloud_init_cd(self, uuid, device_index=3):
-    """
-    Removes CD drive created to mount cloud-init scripts for VM 'uuid'.
-    """
-    # NB: Currently cloud-init CD drive is always created as ide-3.
-    self.vms_power_op(uuid, "off")
-    task_uuid = self._delete(
-      "%s/vms/%s/disks/ide-%d" %
-      (self._base_mgmt_path, uuid, device_index)).json()["taskUuid"]
-    success, _ = self.poll_progress_monitor(task_uuid)
-    if not success:
-      raise SaltCloudException()
-    self.vms_power_op(uuid, "on")
-
   def poll_progress_monitor(self, uuid, timeout_secs=60):
     deadline_secs = time.time() + timeout_secs
     while time.time() < deadline_secs:
@@ -695,34 +456,6 @@ class LegacyClient(object):
     """
     return self._get("%s/clusters" % self._base_path)
 
-  def container_get(self, name=None, uuid=None):
-    """
-    Looks up a storage container by 'name' or 'uuid'.
-    """
-    assert bool(name) ^ bool(uuid), \
-           "Must specify exactly one of 'name', 'uuid'"
-    resp = self._get(
-      "%s/containers" % self._base_path,
-      params={"searchString": name or uuid,
-              "searchAttributeList":
-                "container_name" if name else "container_uuid"}).json()
-    assert int(resp["metadata"]["totalEntities"]) == 1
-    return resp["entities"][0]
-
-  @entity_list
-  def containers_get(self):
-    """
-    Lists available storage containers.
-    """
-    return self._get("%s/containers" % self._base_path)
-
-  @entity
-  def virtual_disk_get(self, uuid):
-    """
-    Looks up a virtual disk by 'uuid'.
-    """
-    return self._get("%s/virtual_disks/%s" % (self._base_path, uuid))
-
   def vms_get(self, name=None, uuid=None):
     """
     Looks up available VMs, filtering on 'name' or 'uuid' if provided.
@@ -752,35 +485,6 @@ class LegacyClient(object):
 
     return ret
 
-  @async_task
-  def vms_create(self, spec):
-    """
-    Creates a new VM according to 'spec'.
-
-    Raises:
-      SaltCloudExecutionFailure if the task is not created successfully.
-    """
-    return self._post("%s/vms" % self._base_path,
-                      data=json.dumps(spec.to_dict()))
-
-  @async_task
-  def vms_clone(self, uuid, spec):
-    """
-    Clones VM with UUID 'uuid' according to 'spec'.
-
-    Raises:
-      SaltCloudExecutionFailure if the task is not created successfully.
-    """
-    spec = remove_keys(spec.to_dict(), "vmDisks")
-    spec["overrideNetworkConfig"] = True
-    for nic in spec["vmNics"]:
-      nic["requestIp"] = False
-    customization = spec.pop("vmCustomizationConfig")
-    return self._post("%s/vms/%s/clone" % (self._base_path, uuid),
-                      data=json.dumps(
-                        {"specList": [spec, ],
-                         "vmCustomizationConfig": customization}))
-
   #============================================================================
   # Public APIs (mgmt v0.8)
   #============================================================================
@@ -788,10 +492,6 @@ class LegacyClient(object):
   @entity_list
   def images_get(self):
     return self._get("%s/images" % self._base_mgmt_path)
-
-  @entity_list
-  def networks_get(self):
-    return self._get("%s/networks" % self._base_mgmt_path)
 
   def tasks_poll(self, uuid, timeout_secs=60):
     """
@@ -837,29 +537,6 @@ class LegacyClient(object):
     """
     return self._delete("%s/vms/%s" % (self._base_mgmt_path, uuid))
 
-  @async_task
-  def vms_power_op(self, uuid, op):
-    """
-    Performs power operation 'op' on VM specified by 'uuid'.
-
-    Args:
-      uuid (str): UUID of VM on which to perform 'op'.
-      op (str): Power to perform on the VM. Either "on" or "off".
-
-    Raises:
-      SaltCloudExecutionFailure if the task is not created successfully.
-    """
-    op = str(op).lower()
-    assert op in ["on", "off"]
-    vm_json = self.vms_get(uuid=uuid)[0]
-    if vm_json.get("powerState") == op:
-      logger.debug("Skipping power op for VM '%s' already in requested state "
-        "'%s'", uuid, op)
-      return None
-
-    return self._post("%s/vms/%s/power_op/%s" %
-                      (self._base_mgmt_path, uuid, op), data="{}")
-
   #============================================================================
   # Protected util methods
   #============================================================================
@@ -871,10 +548,6 @@ class LegacyClient(object):
   def _delete(self, path, params=None):
     return self._issue_request(
       "DELETE", "%s/%s" % (self._base_url, path), params=params)
-
-  def _post(self, path, data=None, params=None):
-    return self._issue_request("POST", "%s/%s" % (self._base_url, path),
-                               data=data, params=params)
 
   def _issue_request(self, verb, url, data=None, params=None):
     func = getattr(self._session, verb.lower())
@@ -931,14 +604,6 @@ def get_entity_by_key(entities, key, val):
   if ret is None:
     raise SaltCloudNotFound("No matches for '%s' == '%s'" % (key, val))
   return ret
-
-
-def remove_keys(entity, keys):
-  for key in keys:
-    if key in entity:
-      del entity["key"]
-
-  return entity
 
 
 def _filter_arguments(kwargs):
@@ -1089,96 +754,6 @@ def create(vm_, call=None):
 
   CreatedInstanceEvent(vm_).fire()
   return dict(result)
-
-def _create(vm_, call=None):
-  """
-  Create a VM as defined by 'vm_'.
-
-  Args:
-    vm_ (dict): VM configuration as provided by salt cloud.
-    call (str|None): Method by which this functions is being invoked.
-
-  Returns:
-    (dict<str,str>): Map of configuration steps to boolean success.
-  """
-  CreatingInstanceEvent(vm_).fire()
-  conn = get_conn()
-
-  logg = _attach_vm_context(vm_)
-  ret = {"created": False,
-         "powered on": False,
-         "deployed minion": False}
-  logg.info("Handling instance create...")
-
-  clone_vm_uuid, vm_spec = AhvVmCreateSpec.from_salt_vm_dict(vm_, conn)
-  logg.debug("Generated VmCloneSpec: %s" %
-    json.dumps(vm_spec.to_dict(), indent=2, sort_keys=True))
-
-  logg.debug("Issuing CloneVM request to Prism...")
-  RequestingInstanceEvent(vm_).fire()
-  task_json = conn.vms_clone(clone_vm_uuid, vm_spec)
-  logg.debug("VM clone task complete")
-
-  QueryingInstanceEvent(vm_).fire()
-  logg.info("VM created")
-  ret["created"] = True
-
-  if not vm_.get("power_on"):
-    CreatedInstanceEvent(vm_).fire()
-    return ret
-
-  logg.info("Powering on VM")
-  vm_uuid = task_json["entityId"][0]
-  conn.vms_power_op(vm_uuid, "on")
-  logg.info("VM powered on successfully")
-  ret["powered on"] = True
-
-  WaitingForSshInstanceEvent(vm_).fire()
-  # TODO (jklein): Cap waiting at something.
-  logg.info("Waiting for VM to acquire IP...")
-  t0 = time.time()
-  while True:
-    logg.debug("Waiting for VM to acquire IP...%d seconds", time.time() - t0)
-    vm_json = conn.vms_get(name=vm_["name"])[0]
-    if vm_json["ipAddresses"]:
-      logg.info("Acquired IP: %s" % vm_json["ipAddresses"])
-      vm_["ssh_host"] = vm_json["ipAddresses"][0]
-      break
-
-    time.sleep(1)
-
-  logg.info("Detaching cloud-init customization CD...")
-  conn.remove_cloud_init_cd(vm_uuid)
-  logg.info("Detached cloud-init customization CD")
-
-  # TODO (jklein): Cap waiting at something.
-  logg.info("Waiting for VM to acquire IP...")
-  t0 = time.time()
-  while True:
-    logg.debug("Waiting for VM to acquire IP...%d seconds",
-      time.time() - t0)
-    vm_json = conn.vms_get(name=vm_["name"])[0]
-    if vm_json["ipAddresses"]:
-      logg.info("Acquired IP: %s" % vm_json["ipAddresses"])
-      vm_["ssh_host"] = vm_json["ipAddresses"][0]
-      if vm_["ssh_host"] == vm_["network"].values()[0]["ipaddr"]:
-        break
-      else:
-        logg.error("Incorrect IP detected: %s" % vm_["ssh_host"])
-
-    time.sleep(1)
-
-  if not vm_.get("deploy"):
-    CreatedInstanceEvent(vm_).fire()
-    return ret
-
-  logg.info("Bootstrapping salt...")
-  __utils__["cloud.bootstrap"](vm_, __opts__)
-  logg.info("Bootstrap complete!")
-  ret["deployed minion"] = True
-
-  CreatedInstanceEvent(vm_).fire()
-  return ret
 
 
 
