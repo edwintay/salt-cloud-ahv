@@ -1499,6 +1499,85 @@ class AplosDiskAddress(object):
 
 CLOUDINIT_DISK = AplosDisk(AplosDiskAddress("ide", 3), "CDROM")
 
+
+class AplosNic(object):
+  known_types = (
+    "NORMAL_NIC",
+    "NETWORK_FUNCTION_NIC"
+  )
+
+  @classmethod
+  def from_dict(klass, data):
+    data = defaultdict(dict, data)
+
+    mac_addr = data.get("mac_address")
+    type_ = data.get("nic_type")
+
+    subnet = AplosSubnet.from_dict( data["subnet_reference"] )
+    endpoints = tuple( AplosNicEndpoint.from_dict(endpoint)
+      for endpoint in data.get("ip_endpoint_list", [])
+    )
+
+    return klass(mac_addr, type_, subnet, endpoints=endpoints)
+
+  def __init__(self,
+      mac_addr,
+      type_="NORMAL_NIC",
+      subnet=None,
+      endpoints=None):
+
+    self.mac_addr = mac_addr
+    self.type_ = type_
+    self.subnet = subnet
+    self.endpoints = endpoints or []
+
+  def to_summary(self):
+    addr = self.mac_addr
+    detail = {
+      "nic_type": self.type_,
+      "subnet": self.subnet.name,
+      "endpoints": [ str(endpoint) for endpoint in self.endpoints ]
+    }
+    return { addr: detail }
+
+class AplosSubnet(object):
+  @classmethod
+  def from_dict(klass, data):
+    name = data.get("name")
+    uuid = data.get("uuid")
+
+    kwargs = {}
+    if "kind" in data:
+      kwargs["kind"] = data["kind"]
+
+    return klass(name, uuid, **kwargs)
+
+  def __init__(self, name, uuid=None, kind="subnet"):
+    self.name = name
+    self.uuid = uuid
+    self.kind = kind
+
+class AplosNicEndpoint(object):
+  known_types = (
+    "LEARNED",
+    "ASSIGNED"
+  )
+
+  @classmethod
+  def from_dict(klass, data):
+    ip = data.get("ip")
+    type_ = data.get("type")
+
+    return klass(ip, type_)
+
+  def __init__(self, ip, type_="ASSIGNED"):
+    self.ip = ip
+    self.type_ = type_
+
+  def __str__(self):
+    return "{0} ({1})".format(self.ip, self.type_)
+
+
 class AplosPowerState(object):
   def __init__(self, power_on):
     if isinstance(power_on, basestring):
