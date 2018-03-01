@@ -1029,7 +1029,7 @@ def avail_images(call=None):
   conn = get_conn()
   return dict((img["name"], img) for img in conn.images_get())
 
-def avail_sizes(call=None):
+def avail_sizes(*args, **kwargs):
   """
   Lists available options for configuring VM CPU/RAM.
 
@@ -1039,9 +1039,10 @@ def avail_sizes(call=None):
   Returns:
     (dict<str, str>) Map of argument names to descriptions.
   """
-  if call != "function":
+  call, kwargs = _filter_arguments(kwargs)
+  if call != "function" and call is not None:
     raise SaltCloudSystemExit("The avail_sizes function must be called "
-      "with -f or --function, or with the --list-sizes option.")
+      "with -f/--function <PROVIDER>, or with --list-sizes.")
 
   return {
     "<num_vcpus>": "Number of vCPUs with which to configure the VM",
