@@ -1856,15 +1856,11 @@ class AplosClient(object):
     ):
 
     logger.info("Looking for template {}".format(clone_from))
-    status, result = self.get_vm_by_name(clone_from)
-    if status >= 300:
-      logger.error("Failed to fetch info for template {}".format(clone_from))
-      AplosUtil.print_failure(result)
+    template_vm = self.get_vm_by_name(clone_from)
+    if not template_vm:
       return False
 
-    template_vm = AplosVmStatus.from_dict(result)
     logger.info("Cloning VM from template {}".format(template_vm.name))
-
     status, result = self.create_vm(
       cluster_uuid,
       template_vm,
@@ -1945,7 +1941,15 @@ class AplosClient(object):
     if len(entities) < 1:
       raise SaltCloudNotFound("no VM with name {}".format(name))
 
-    return status, entities[0]
+    if status >= 300:
+      logger.error("Failed to fetch vm {}".format(name))
+      AplosUtil.print_failure(result)
+      return
+
+    entity = entities[0]
+    vm = AplosVmStatus.from_dict(entity)
+
+    return vm
 
   def get_vm_by_uuid(self, uuid):
     """ Get a VM by its UUID """
