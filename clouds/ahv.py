@@ -359,17 +359,6 @@ class LegacyClient(object):
     self.verify_ssl = verify_ssl
 
   #============================================================================
-  # Public APIs (v1)
-  #============================================================================
-
-  @entity_list
-  def clusters_get(self):
-    """
-    Looks up available clusters.
-    """
-    return self._get("%s/clusters" % self._base_path)
-
-  #============================================================================
   # Public APIs (mgmt v0.8)
   #============================================================================
 
@@ -629,24 +618,6 @@ def destroy(name, call=None):
   return True
 
 
-
-def avail_locations(call=None):
-  """
-  List available clusters.
-
-  Args:
-    call (str|None): Method by which this functions is being invoked.
-
-  Returns:
-    (dict<str,dict>): Map of cluster names to cluster metadata for clusters
-      accessible via the configured Prism IP.
-  """
-  if call != "function" and call is not None:
-    raise SaltCloudSystemExit("The avail_locations function must be called "
-      "with -f or --function, or with the --list-locations option.")
-
-  conn = get_conn()
-  return dict((cluster["name"], cluster) for cluster in conn.clusters_get())
 
 def avail_images(call=None):
   """
