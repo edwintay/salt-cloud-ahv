@@ -1296,6 +1296,27 @@ def list_nodes(*args, **kwargs):
   )
   return result
 
+def show_instance(*args, **kwargs):
+  """
+  Show details about the VM.
+
+  Args:
+    name (str): Name of VM to query.
+    call (str|None): Method by which this functions is being invoked.
+
+  Returns:
+    dict<str,dict>: Map of VM name to full VM information
+  """
+  call, kwargs = _filter_arguments(kwargs)
+  if call != "action":
+    raise SaltCloudSystemExit("The show_instance action must be called "
+      "with -a/--action <INSTANCE>.")
+
+  name = args[0]
+  conn = get_conn(version=3)
+  vm = conn.get_vm_by_name(name)
+  return vm.to_dict()
+
 
 
 # ===========================================================================
