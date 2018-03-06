@@ -1296,26 +1296,6 @@ def list_nodes(*args, **kwargs):
   )
   return result
 
-def show_instance(name, call=None):
-  """
-  Shows details about VM 'name'.
-
-  Args:
-    name (str): Name of VM to query.
-    call (str|None): Method by which this functions is being invoked.
-
-  Returns:
-    (dict<str, AcropolisVm>) Map of VM name to full VM metadata.
-  """
-  if call != "action":
-    raise SaltCloudSystemExit("The show_instance action must be called "
-      "with -a or --action.")
-
-  conn = get_conn()
-
-  vm_json = get_entity_by_key(conn.vms_get(name=name), "vmName", name)
-  return remove_keys(vm_json, ["stats, usageStats"])
-
 
 
 # ===========================================================================
