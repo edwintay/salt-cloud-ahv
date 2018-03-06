@@ -316,51 +316,6 @@ class LegacyClient(object):
   #============================================================================
   # Decorators
   #============================================================================
-
-  def async_task(*func, **kwargs):
-    # pylint: disable=no-self-argument,no-method-argument
-    """
-    Decorator for REST APIs corresponding to asynchronous tasks.
-    """
-    def _async_task_wrapper(_func):
-      @functools.wraps(_func)
-      def _wrapped(self, *_args, **_kwargs):
-        # pylint: disable=not-callable
-        try:
-          resp = _func(self, *_args, **_kwargs).json()
-        except Exception as exc:
-          raise SaltCloudExecutionFailure(str(exc))
-
-        if "taskUuid" not in resp:
-          raise SaltCloudExecutionFailure(resp)
-
-        task_uuid = resp["taskUuid"]
-        if not kwargs.get("block", True):
-          return task_uuid
-
-        timeout_secs = kwargs.get("timeout_secs", 60)
-        logger.debug("Blocking on task '%s' (timeout: %s seconds)" %
-          (task_uuid, timeout_secs))
-        success, resp_json = self.poll_progress_monitor(
-          task_uuid, timeout_secs=timeout_secs)
-        if kwargs.get("raise_on_error", True) and not success:
-          raise SaltCloudExecutionFailure()
-
-        return resp_json
-
-      return _wrapped
-
-    # Check for case where optional arguments are omitted and decorator is
-    # applied directly to the target function.
-    if func:
-      assert len(func) == 1 and callable(func[0]), \
-             "Unexpected argument provided to @async_task"
-      assert not kwargs, \
-        "@async_task passed a callable argument, but was not applied as a " \
-        "parameter-free decorator"
-      return _async_task_wrapper(func[0])
-    return _async_task_wrapper
-
   def entity_list(func):
     # pylint: disable=no-self-argument
     """
@@ -404,48 +359,6 @@ class LegacyClient(object):
     self.verify_ssl = verify_ssl
 
   #============================================================================
-  # Public util methods
-  #============================================================================
-  def poll_progress_monitor(self, uuid, timeout_secs=60):
-    deadline_secs = time.time() + timeout_secs
-    while time.time() < deadline_secs:
-      logger.debug("Waiting on task '%s'" % uuid)
-      resp = self.progress_monitors_get(uuid=uuid)
-      assert len(resp) == 1
-      pct_complete = int(resp[0].get("percentageCompleted", 0))
-      if pct_complete == 100:
-        return str(resp[0].get("status")).lower(), resp[0]
-
-      logger.debug("Task in progress: %s" % resp[0].get("status"))
-
-      time.sleep(1)
-
-    raise SaltCloudExecutionTimeout("Task '%s' timed out after %s seconds" %
-                                    (uuid, timeout_secs))
-
-  #============================================================================
-  # Undocumented APIs
-  #============================================================================
-
-  @entity_list
-  def progress_monitors_get(self, uuid=None):
-    """
-    Lookup progress information for tasks.
-
-    Args:
-      uuid (str|None): Optional. If provided, restrict query to the task
-        specified by 'uuid'.
-
-    Returns:
-      requests.Response, content is serialized JSON containing:
-        list<dict>: List of task info dicts.
-    """
-    url = "%s/progress_monitors" % self._base_path
-    if uuid:
-      url = "%s?filterCriteria=%s" % (url, urllib.quote("uuid==%s" % uuid))
-    return self._get(url)
-
-  #============================================================================
   # Public APIs (v1)
   #============================================================================
 
@@ -456,35 +369,6 @@ class LegacyClient(object):
     """
     return self._get("%s/clusters" % self._base_path)
 
-  def vms_get(self, name=None, uuid=None):
-    """
-    Looks up available VMs, filtering on 'name' or 'uuid' if provided.
-    """
-    assert not (name and uuid)
-    params = {}
-    if uuid:
-      return [self._get("%s/vms/%s" % (self._base_path, uuid)).json()]
-    if name:
-      params["searchString"] = name
-      # NB: Fields as defined in $TOP/zeus/configuration.proto
-      params["searchAttributeList"] = "vm_name"
-    if params:
-      ret = self._get(
-        "%s/vms" % self._base_path, params=params).json()["entities"]
-      for vm_json in ret:
-        if vm_json["vmName"] == name:
-          return [vm_json]
-    # TODO (jklein): Doesn't seem to be any way to avoid querying both APIs.
-    ret = self._get("%s/vms" % self._base_mgmt_path).json()["entities"]
-    ret2 = dict((vm_json["vmName"], vm_json)
-                for vm_json in self._get(
-                  "%s/vms" % self._base_path).json()["entities"])
-
-    for vm_json in ret:
-      vm_json.update(ret2[vm_json["config"]["name"]])
-
-    return ret
-
   #============================================================================
   # Public APIs (mgmt v0.8)
   #============================================================================
@@ -493,50 +377,6 @@ class LegacyClient(object):
   def images_get(self):
     return self._get("%s/images" % self._base_mgmt_path)
 
-  def tasks_poll(self, uuid, timeout_secs=60):
-    """
-    Blocks until completion of 'uuid' or specified timeout.
-
-    If 'retries' is a positive integer, method will sleep and retry polling
-    up to 'retries' times for a task which is not found.
-
-    Args:
-      uuid (str): UUID of task to poll.
-      timeout_secs: (None|int): Optional. If a positive integer, the maximum
-        time to wait on the task in seconds. Otherwise, no timeout is set.
-    """
-    logger.debug("Polling task '%s' with timeout %s", uuid, timeout_secs)
-    params = {}
-    if timeout_secs and timeout_secs > 0:
-      params["timeoutseconds"] = timeout_secs
-
-    resp = self._get("%s/tasks/%s/poll" % (self._base_mgmt_path, uuid),
-                     params=params)
-    resp, status_code = resp.json(), resp.status_code
-    if resp.get("isUnrecognized"):
-      raise SaltCloudNotFound("Task '%s' not recognized" % uuid)
-    if resp.get("timedOut"):
-      raise SaltCloudExecutionTimeout()
-
-    resp = resp.get("taskInfo", {})
-    error = resp.get("metaResponse", {}).get("error", "kNoError")
-    status = resp.get("progressStatus", "").lower()
-    success = all([
-      error == "kNoError", status == "succeeded", status_code == 200])
-    return success, resp
-
-  @async_task
-  def vms_delete(self, uuid):
-    """
-    Deletes the VM specified by 'uuid'.
-
-    Asynchronous operation, returns UUID of the corresponding task.
-
-    Raises:
-      SaltCloudExecutionFailure if the task is not created successfully.
-    """
-    return self._delete("%s/vms/%s" % (self._base_mgmt_path, uuid))
-
   #============================================================================
   # Protected util methods
   #============================================================================
@@ -544,10 +384,6 @@ class LegacyClient(object):
   def _get(self, path, params=None):
     return self._issue_request(
       "GET", "%s/%s" % (self._base_url, path), params=params)
-
-  def _delete(self, path, params=None):
-    return self._issue_request(
-      "DELETE", "%s/%s" % (self._base_url, path), params=params)
 
   def _issue_request(self, verb, url, data=None, params=None):
     func = getattr(self._session, verb.lower())
@@ -754,39 +590,6 @@ def create(vm_, call=None):
 
   CreatedInstanceEvent(vm_).fire()
   return dict(result)
-
-
-
-def destroy(vm_name, call=None):
-  """
-  Destroys VM 'vm_name'.
-
-  Args:
-    vm_name (str): Name of VM to destroy.
-    call (str|None): Method by which this functions is being invoked.
-
-  Returns:
-    {"message": <str>} Message to display on success.
-
-  Raises:
-    SaltCloudNotFound if unable to locate a matching VM, or if 'name' does
-      not uniquely identify the VM.
-  """
-  DestroyingInstanceEvent(vm_name).fire()
-
-  conn = get_conn()
-
-  logg = _attach_vm_context({"name": vm_name})
-  logg.info("Handling instance destroy...")
-  vm_json = get_entity_by_key(conn.vms_get(name=vm_name), "vmName", vm_name)
-  task_uuid = conn.vms_delete(vm_json["uuid"])
-  logg.debug("Created VM Delete task")
-  if not conn.tasks_poll(task_uuid):
-    raise SaltCloudException("Deletion task failed for VM '%s'" % vm_name)
-
-  logg.info("Deleted VM")
-  DestroyedInstanceEvent(vm_name).fire()
-  return {"message": "Successfully deleted"}
 
 
 
