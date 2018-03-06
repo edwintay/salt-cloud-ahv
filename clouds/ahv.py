@@ -593,6 +593,43 @@ def create(vm_, call=None):
 
 
 
+def destroy(name, call=None):
+  """
+  Destroy VM by name.
+
+  Args:
+    name (str): Name of VM to destroy.
+    call (str|None): Method by which this functions is being invoked.
+
+  Returns:
+    True on success, False otherwise
+
+  Raises:
+    SaltCloudNotFound:
+      If no VM with 'name' could be found.
+    SaltCloudSystemExit:
+      If 'name' corresponds to more than one VM.
+  """
+
+  DestroyingInstanceEvent(name).fire()
+
+  conn = get_conn(version=3)
+
+  logg = _attach_vm_context({"name": name})
+  logg.info("Deleting VM ...")
+
+  vm_dict = conn.delete_vm_by_name(name)
+  if not vm_dict:
+    logg.error("Failed to delete VM")
+    return False
+
+  logg.info("Deleted VM")
+  DestroyedInstanceEvent(name).fire()
+
+  return True
+
+
+
 def avail_locations(call=None):
   """
   List available clusters.
@@ -1238,6 +1275,9 @@ class AplosClient(object):
   def PUT(self, *args, **kwargs):
     return self.request("PUT", *args, **kwargs)
 
+  def DELETE(self, *args, **kwargs):
+    return self.request("DELETE", *args, **kwargs)
+
   # =========================================================================
   # commands
   # =========================================================================
@@ -1354,6 +1394,35 @@ class AplosClient(object):
     endpoint = "vms/{}".format(uuid)
     status, result = self.GET(endpoint=endpoint)
     return status, result
+
+  def delete_vm_by_name(self, name):
+    try:
+      vm = self.get_vm_by_name(name)
+    except SaltCloudNotFound as ex:
+      logger.info("VM {0} does not exist. Skipping ...".format(name))
+      return True
+
+    return self.delete_vm_by_uuid(vm.uuid)
+
+  def delete_vm_by_uuid(self, uuid):
+    """ Delete a VM by its UUID """
+    logger.debug("Deleting VM {}".format(uuid))
+
+    endpoint = "vms/{0}".format(uuid)
+    status, result = self.DELETE(endpoint=endpoint)
+
+    if status == 404:
+      logger.info("VM {0} does not exist. Skipping ...".format(uuid))
+      return True
+    elif status != 202:
+      AplosUtil.print_failure(result)
+      return False
+
+    status, result = self.get_vm_by_uuid(uuid)
+    vm_data = AplosUtil.track_request(status, result, self.get_vm_by_uuid)
+    if not vm_data:
+      return False
+    return True
 
   def list_vms(self):
     """ Get all VMs """
