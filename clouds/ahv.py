@@ -854,6 +854,16 @@ def remove_keys(entity, keys):
 
   return entity
 
+
+def _filter_arguments(kwargs):
+  """ handle arg parsing of salt.cloud.do_function() """
+  call = kwargs.get("call")
+  if "kwargs" in kwargs:
+    kwargs = kwargs["kwargs"]
+
+  return call, kwargs
+
+
 #==============================================================================
 # Decorators
 #==============================================================================
