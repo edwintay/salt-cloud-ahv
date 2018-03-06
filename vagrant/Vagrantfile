@@ -1,0 +1,58 @@
+VAGRANTFILE_API_VERSION = "2"
+
+Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
+  saltvers = "2017.7.3"
+  vmname = :master
+  spec = {
+    :ip => "192.168.50.10",
+    :hostname => "master.local",
+    :cpus => 2,
+    :memory => 2048,
+    :box => "ubuntu/xenial64"
+  }
+
+  config.vm.define vmname, primary: true do |cloud_c|
+    cloud_c.vm.provider "virtualbox" do |vb|
+      vb.name = "#{vmname}"
+      vb.cpus = spec[:cpus]
+      vb.memory = spec[:memory]
+    end
+    cloud_c.vm.box = spec[:box]
+    cloud_c.vm.hostname = spec[:hostname]
+    cloud_c.vm.network "private_network", ip: spec[:ip]
+
+    # forward salt master traffic
+    cloud_c.vm.network "forwarded_port", guest: 4505, host: 4505
+    cloud_c.vm.network "forwarded_port", guest: 4506, host: 4506
+
+    # Default sync is not needed, and takes up time during provisioning
+    cloud_c.vm.synced_folder ".", "/vagrant", disabled: true
+
+    # Link salt-cloud-ahv as extension module
+    cloud_c.vm.synced_folder File.absolute_path(".."), "/srv/cloud/ahv", type: "nfs", mount_options: ["ro"]
+
+    # Link salt-cloud config files
+    Dir.glob("conf/*") do |path|
+      local = File.join(path)
+      guest = File.join("/etc/salt", File.basename(path))
+      # salt-cloud needs the /etc/salt/cloud.*.d folders to be writable
+      cloud_c.vm.synced_folder local, guest, type: "nfs"
+    end
+
+    cloud_c.vm.provision :salt do |salt|
+      # Only install master
+      salt.install_master = true
+      salt.master_config = "etc/#{vmname}"
+      salt.no_minion = true
+
+      salt.install_type = "stable"
+      salt.install_args = "#{saltvers}"
+
+      salt.verbose = true
+      salt.colorize = true
+      salt.bootstrap_options = "-P -c /tmp"
+    end
+  end
+
+  config.vm.provision "shell", inline: "apt update && apt -y install salt-cloud"
+end

@@ -1,0 +1,4 @@
+/.vagrant
+/conf/**/*.conf
+/conf/**/*.conf.disabled
+/*.log

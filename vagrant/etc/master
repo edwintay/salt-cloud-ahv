@@ -1,0 +1,4 @@
+hash_type: sha256
+log_level_logfile: debug
+
+extension_modules: /srv/cloud/ahv
