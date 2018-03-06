@@ -619,6 +619,30 @@ def destroy(name, call=None):
 
 
 
+def avail_locations(*args, **kwargs):
+  """
+  List available clusters.
+
+  Args:
+    call (str|None): Method by which this functions is being invoked.
+
+  Returns:
+    (dict<str,dict>): Map of cluster names to cluster summary.
+  """
+  call, kwargs = _filter_arguments(kwargs)
+  if call != "function" and call is not None:
+    raise SaltCloudSystemExit("The avail_locations function must be called "
+      "with -f/--function <PROVIDER>, or with --list-locations.")
+
+  conn = get_conn(version=3)
+  clusters = conn.list_clusters()
+
+  result = dict( (cluster.name, cluster.to_summary())
+    for cluster in clusters
+      if cluster.has_pe and cluster.has_ahv
+  )
+  return result
+
 def avail_images(call=None):
   """
   List available VM images.
@@ -711,6 +735,74 @@ def show_instance(*args, **kwargs):
 # ===========================================================================
 # api entities
 # ===========================================================================
+class AplosClusterStatus(object):
+  @classmethod
+  def from_dict(klass, data):
+    data = defaultdict(dict, data)
+
+    metadata = data["metadata"]
+    uuid = metadata.get("uuid")
+
+    status = data["status"]
+    name = status.get("name")
+
+    resources = status["resources"]
+    ip = resources["network"].get("external_ip")
+
+    config = resources["config"]
+    version = config["build"]["version"]
+    opmode = config.get("operation_mode")
+
+    services = config.get("service_list", [])
+    has_pe = "AOS" in services
+    mgmt_servers = config.get("management_server_list", [])
+    has_ahv = len(mgmt_servers) < 1
+
+    kwargs = {
+      "uuid": uuid,
+      "name": name,
+      "ip": ip,
+      "version": version,
+      "opmode": opmode,
+      "has_pe": has_pe,
+      "has_ahv": has_ahv
+    }
+    return klass(status, **kwargs)
+
+  def __init__(self, rawstatus,
+      uuid,
+      name,
+      ip=None,
+      version=None,
+      opmode="NORMAL",
+      has_pe=False,
+      has_ahv=False):
+    self.status_ = rawstatus
+
+    self.uuid = uuid
+    self.name = name
+    self.ip = ip
+
+    self.version = version
+    self.opmode = opmode
+    self.has_pe = has_pe
+    self.has_ahv = has_ahv
+
+  def to_dict(self):
+    output = self.status_
+    return output
+
+  def to_summary(self):
+    output = {
+      "uuid": self.uuid,
+      "external_ip": self.ip,
+      "version": self.version,
+      "operation_mode": self.opmode
+    }
+    return output
+
+
+
 class AplosVmStatus(object):
   @classmethod
   def from_dict(klass, data):
@@ -1411,6 +1503,24 @@ class AplosClient(object):
     entities = result.get("entities", [])
     vms = [ AplosVmStatus.from_dict(entity) for entity in entities ]
     return vms
+
+  def list_clusters(self):
+    """ Get all clusters """
+    endpoint = "clusters/list"
+    body = {
+      "length": 100 # safe default so we don't overload server
+    }
+
+    status, result = self.POST(endpoint=endpoint, body=body)
+    if status >= 300:
+      logger.error("Failed to list clusters")
+      AplosUtil.print_failure(result)
+      return []
+
+    entities = result.get("entities", [])
+    clusters = [ AplosClusterStatus.from_dict(entity) for entity in entities ]
+    return clusters
+
 
   def create_vm(self,
       cluster_uuid,
