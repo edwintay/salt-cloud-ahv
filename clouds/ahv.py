@@ -1273,6 +1273,27 @@ def avail_sizes(*args, **kwargs):
     "<memory_size_mib>": "Size of VM memory (in MiB)",
   }
 
+def list_nodes(*args, **kwargs):
+  """
+  Show summary of all VMs on provider.
+
+  Args:
+    call (str|None): Method by which this functions is being invoked.
+
+  Returns:
+    dict<str,dict>: Map of VM names to corresponding VM summary
+  """
+  call, kwargs = _filter_arguments(kwargs)
+  if call != "function" and call is not None:
+    raise SaltCloudSystemExit("The list_nodes function must be be called "
+      "with -f/--function <PROVIDER>, or with --query.")
+
+  conn = get_conn(version=3)
+  vms = conn.list_vms()
+
+  result = dict((vm.name, vm.to_summary()) for vm in vms)
+  return result
+
 def show_instance(name, call=None):
   """
   Shows details about VM 'name'.
@@ -1311,19 +1332,84 @@ class AplosVmStatus(object):
 
     status = data["status"]
     name = status.get("name")
+    description = status.get("description")
+
+    resources = status["resources"]
+    num_vcpus = resources.get("num_sockets")
+    num_cores_per_vcpu = resources.get("num_vcpus_per_socket")
+    memory_size_mib = resources.get("memory_size_mib")
+    disks = [ AplosDisk.from_dict(rawdisk)
+      for rawdisk in resources.get("disk_list", [])
+    ]
+    nics = [ AplosNic.from_dict(rawnic)
+      for rawnic in resources.get("nic_list", [])
+    ]
+    power_state = AplosPowerState( resources.get("power_state") )
 
     kwargs = {
       "rawstatus": status,
       "uuid": uuid,
-      "name": name
+      "name": name,
+      "description": description,
+
+      "num_vcpus": num_vcpus,
+      "num_cores_per_vcpu": num_cores_per_vcpu,
+      "memory_size_mib": memory_size_mib,
+      "disks": disks,
+      "nics": nics,
+      "power_state": power_state
     }
     return klass(**kwargs)
 
-  def __init__(self, rawstatus, uuid, name):
+  def __init__(self, rawstatus,
+      uuid,
+      name,
+      description=None,
+      num_vcpus=0,
+      num_cores_per_vcpu=0,
+      memory_size_mib=0,
+      disks=None,
+      nics=None,
+      power_state=None):
+
     self._status = rawstatus
 
     self.uuid = uuid
     self.name = name
+    self.description = description
+
+    self.num_vcpus = num_vcpus
+    self.num_cores_per_vcpu = num_cores_per_vcpu
+    self.memory_size_mib = memory_size_mib
+    self.disks = disks or []
+    self.nics = nics or []
+    self.power_state = power_state or APLOS_POWER_STATE_OFF
+
+  def to_dict(self):
+    output = self._status
+    return output
+
+  def to_summary(self):
+    disk_summaries = {}
+    for disk in self.disks:
+      disk_summaries.update( disk.to_summary() )
+
+    nic_summaries = {}
+    for nic in self.nics:
+      nic_summaries.update( nic.to_summary() )
+
+    output = {
+      "uuid": self.uuid,
+      "name": self.name,
+      "description": self.description,
+      "num_vcpus": self.num_vcpus,
+      "num_cores_per_vcpu": self.num_cores_per_vcpu,
+      "memory_size_mib": self.memory_size_mib,
+      "disks": disk_summaries,
+      "nics": nic_summaries,
+      "power_state": str(self.power_state)
+    }
+    return output
 
 class AplosVmSpec(object):
   @classmethod
@@ -1419,6 +1505,14 @@ class AplosDisk(object):
       del output["disk_size_mib"]
     return output
 
+  def to_summary(self):
+    shortaddr = str(self.address)
+    detail = {
+      "device_type": self.type_,
+      "disk_size_mib": self.size_mib
+    }
+    return { shortaddr: detail }
+
 class AplosDiskAddress(object):
   @classmethod
   def from_dict(klass, data):
@@ -1439,6 +1533,9 @@ class AplosDiskAddress(object):
 
   def __ne__(self, other):
     return not self.__eq__(other)
+
+  def __str__(self):
+    return "{0}.{1}".format(self.adapter, self.index)
 
   def to_dict(self):
     return {
@@ -1834,6 +1931,23 @@ class AplosClient(object):
     endpoint = "vms/{}".format(uuid)
     status, result = self.GET(endpoint=endpoint)
     return status, result
+
+  def list_vms(self):
+    """ Get all VMs """
+    endpoint = "vms/list"
+    body = {
+      "length": 100 # safe default so we don't overload server
+    }
+
+    status, result = self.POST(endpoint=endpoint, body=body)
+    if status >= 300:
+      logger.error("Failed to list vms")
+      AplosUtil.print_failure(result)
+      return []
+
+    entities = result.get("entities", [])
+    vms = [ AplosVmStatus.from_dict(entity) for entity in entities ]
+    return vms
 
   def create_vm(self,
       cluster_uuid,
