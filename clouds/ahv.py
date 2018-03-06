@@ -304,39 +304,6 @@ class DestroyedInstanceEvent(Event):
 
 
 
-#=============================================================================
-# salt entities
-#=============================================================================
-# TODO (jklein): Clean this up too...
-class SaltVm(object):
-  __KEYS__ = ("id", "image", "size", "state", "private_ips", "public_ips")
-
-  def __init__(self, entity_json):
-    config_json = entity_json["config"]
-
-    # VM UUID
-    self.id = entity_json["uuid"]
-
-    # TODO (jklein): See if we need to convert/restrict to a canonical set of
-    # Salt-defined states.
-    self.state = entity_json["state"]
-
-    # Name of image from which VM was created
-    self.image = config_json.get("sourceImage", "")
-
-    # Resource info for VM
-    self.size = "%s vCPUs, %s MB RAM" % (
-      config_json["numVcpus"], config_json["memoryMb"])
-
-    # VM external IPs
-    self.public_ips = entity_json.get("ipAddresses", [])
-
-    # VM internal IPs
-    self.private_ips = []
-
-  def to_dict(self):
-    return dict((k, getattr(self, k)) for k in self.__KEYS__)
-
 #==============================================================================
 # AHV entities
 #==============================================================================
@@ -1305,24 +1272,6 @@ def avail_sizes(*args, **kwargs):
       "Number of cores with which to configure each vCPU",
     "<memory_size_mib>": "Size of VM memory (in MiB)",
   }
-
-def list_nodes(call=None):
-  """
-  Args:
-    call (str|None): Method by which this functions is being invoked.
-
-  NB: Terminology conflicts with Acropolis terminology.
-
-  Returns:
-    (dict<str,SaltVm>) Map of VM names to canonical salt metadata for
-      corresponding VMs.
-  """
-  if call == "action":
-    raise SaltCloudSystemExit("The list_nodes function cannot be called "
-      "as an action.")
-
-  conn = get_conn()
-  return dict((vm["vmName"], SaltVm(vm).to_dict()) for vm in conn.vms_get())
 
 def show_instance(name, call=None):
   """
