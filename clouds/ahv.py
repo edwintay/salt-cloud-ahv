@@ -1298,8 +1298,93 @@ class AplosVmStatus(object):
     self.uuid = uuid
     self.name = name
 
+class AplosDisk(object):
+  @classmethod
+  def from_dict(klass, data):
+    uuid = data.get("uuid")
+    size_mib = data.get("disk_size_mib")
+
+    data = defaultdict(dict, data)
+    type_ = data["device_properties"].get("device_type")
+    raw_address = data["device_properties"]["disk_address"]
+    address = AplosDiskAddress.from_dict(raw_address)
+
+    kwargs = {}
+    if type_:
+      kwargs["type_"] = type_
+    if uuid:
+      kwargs["uuid"] = uuid
+    if size_mib:
+      kwargs["size_mib"] = size_mib
+    return klass(address, **kwargs)
+
+  def __init__(self, address,
+      type_="DISK",
+      uuid=None,
+      size_mib=None):
+    self.address = address
+    self.type_ = unicode(type_)
+    self.uuid = uuid
+    self.size_mib = size_mib
+
+  def __eq__(self, other):
+    return (
+      isinstance(other, self.__class__) and
+        self.type_ == other.type_ and self.address == other.address
+    )
+
+  def __ne__(self, other):
+    return not self.__eq__(other)
+
+  def to_dict(self):
+    output = {
+      "uuid": self.uuid,
+      "device_properties": {
+        "device_type": self.type_,
+        "disk_address": self.address.to_dict()
+      },
+      "disk_size_mib": self.size_mib
+    }
+    if not self.uuid:
+      del output["uuid"]
+    if not self.size_mib:
+      del output["disk_size_mib"]
+    return output
+
+class AplosDiskAddress(object):
+  @classmethod
+  def from_dict(klass, data):
+    index = data.get("device_index")
+    adapter = data.get("adapter_type")
+    return klass(adapter, index)
+
+  def __init__(self, adapter, index):
+    self.adapter = unicode(adapter.upper())
+    self.index = int(index)
+
+  def __eq__(self, other):
+    return (
+      isinstance(other, self.__class__) and
+      self.adapter == other.adapter and
+      self.index == other.index
+    )
+
+  def __ne__(self, other):
+    return not self.__eq__(other)
+
+  def to_dict(self):
+    return {
+      "adapter_type": self.adapter,
+      "device_index": self.index
+    }
+
+CLOUDINIT_DISK = AplosDisk(AplosDiskAddress("ide", 3), "CDROM")
 
 
+
+# ===========================================================================
+# api async helpers
+# ===========================================================================
 class AplosUtil(object):
   @classmethod
   def print_failure(klass, result):
