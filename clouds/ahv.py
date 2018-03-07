@@ -77,7 +77,11 @@ def get_configured_provider():
   return config.is_provider_configured(
     __opts__,
     __active_provider_name__ or __virtualname__,
-    required_keys=("user", "password", "prism_ip")
+    required_keys=(
+      "prism_host",
+      "prism_user",
+      "prism_password"
+    )
   )
 
 def get_dependencies():
@@ -891,7 +895,12 @@ class PrismAPIClient(object):
 #==============================================================================
 def get_conn():
   conf = get_configured_provider()
-  return PrismAPIClient(conf["prism_ip"], conf["user"], conf["password"])
+  client = PrismAPIClient(
+    host=conf["prism_host"],
+    user=conf["prism_user"],
+    password=conf["prism_password"]
+  )
+  return client
 
 
 def get_entity_by_key(entities, key, val):
