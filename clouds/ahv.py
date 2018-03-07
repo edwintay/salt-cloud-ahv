@@ -1104,11 +1104,23 @@ def create(vm_, call=None):
   ))
   result.powered_on = power_on
 
-  # Done
   logg.info("VM created")
   result.created = True
-  CreatedInstanceEvent(vm_).fire()
 
+  logg.info("Bootstrapping salt ...")
+  ip_list = list(AplosUtil.extract_ips(
+    defaultdict(dict, vm_data)["status"]["resources"]["nic_list"]
+  ))
+  vm_["ssh_host"] = ip_list[0]
+  ret = __utils__["cloud.bootstrap"](vm_, __opts__)
+  if "Error" in ret:
+    logg.warning(ret["Error"])
+  else:
+    logg.info("Bootstrap complete!")
+    result.bootstrapped = True
+    logg.debug("ret: {}".format(json.dumps(ret, indent=2)))
+
+  CreatedInstanceEvent(vm_).fire()
   return dict(result)
 
 def _create(vm_, call=None):
