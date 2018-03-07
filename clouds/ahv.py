@@ -853,7 +853,7 @@ def _filter_arguments(kwargs):
 #==============================================================================
 # Salt cloud driver interface
 #==============================================================================
-def create(vm_, call=None):
+def _create(vm_, call=None):
   """
   Create a VM as defined by 'vm_'.
 
