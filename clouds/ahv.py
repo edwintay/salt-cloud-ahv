@@ -539,7 +539,8 @@ class LegacyClient(object):
 
   def __init__(self, host, user, password, port=9440,
                base_path="/PrismGateway/services/rest/v1",
-               base_mgmt_path="/api/nutanix/v0.8"):
+               base_mgmt_path="/api/nutanix/v0.8",
+               verify_ssl=True):
     # requests.Session to use for communicating with Prism.
     self._session = requests.Session()
     self._session.auth = (user, password)
@@ -551,6 +552,8 @@ class LegacyClient(object):
     self._base_path = base_path
     # Base path for v0.8 Prism management REST API
     self._base_mgmt_path = base_mgmt_path
+
+    self.verify_ssl = verify_ssl
 
   #============================================================================
   # Public util methods
@@ -806,7 +809,11 @@ class LegacyClient(object):
     if not func:
       raise SaltCloudSystemExit("Invalid HTTP method '%s'" % verb)
 
-    return func(url, data=data, params=params if params else {}, verify=False)
+    return func(url,
+      data=data,
+      params=params if params else {},
+      verify=self.verify_ssl
+    )
 
 #==============================================================================
 # Utils
