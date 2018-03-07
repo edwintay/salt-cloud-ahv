@@ -81,6 +81,7 @@ def get_configured_provider():
     __opts__,
     __active_provider_name__ or __virtualname__,
     required_keys=(
+      "cluster_uuid",
       "prism_host",
       "prism_user",
       "prism_password"
@@ -870,6 +871,7 @@ def create(vm_, call=None):
   logg = _attach_vm_context(vm_)
   logg.info("Creating instance ...")
 
+  cluster_uuid = vm_["cluster_uuid"]
   clone_from = vm_["clone_from"]
   vm_name = vm_["name"]
   ipaddr = vm_["network"].values()[0]["ip"]
@@ -879,6 +881,7 @@ def create(vm_, call=None):
   RequestingInstanceEvent(vm_).fire()
   QueryingInstanceEvent(vm_).fire()
   task_json = conn.clone_vm(
+    cluster_uuid=cluster_uuid,
     clone_from=clone_from,
     os_family=os_family,
     vm_name=vm_name,
@@ -1120,7 +1123,6 @@ def show_instance(name, call=None):
 # ===========================================================================
 # Prism v3 client
 # ===========================================================================
-CLUSTER_UUID = "0005419d-d510-424c-0000-00000000b3b0"
 NETWORK_UUID = "74e481f9-275d-4c65-89cc-705c16248450"
 
 CENTOS7_CLOUD_CFG=r"""#cloud-config
@@ -1380,7 +1382,7 @@ class AplosClient(object):
   # =========================================================================
   # commands
   # =========================================================================
-  def clone_vm(self, clone_from, os_family, vm_name, vm_ip, size_mem_mib, num_vcpus):
+  def clone_vm(self, cluster_uuid, clone_from, os_family, vm_name, vm_ip, size_mem_mib, num_vcpus):
     logger.info("Looking for template {}".format(clone_from))
     status, result = self.get_vm_by_name(clone_from)
     if status >= 300:
@@ -1391,7 +1393,7 @@ class AplosClient(object):
     template_vm = AplosVmStatus.from_dict(result)
     logger.info("Cloning VM from template {}".format(template_vm.name))
 
-    status, result = self.create_vm(template_vm, os_family, vm_name, vm_ip, size_mem_mib, num_vcpus)
+    status, result = self.create_vm(cluster_uuid, template_vm, os_family, vm_name, vm_ip, size_mem_mib, num_vcpus)
     if str(status) == "408":
       logger.error(json.dumps(result.get("message_list"), indent=2))
       return False
@@ -1443,7 +1445,14 @@ class AplosClient(object):
     status, result = self.GET(endpoint=endpoint)
     return status, result
 
-  def create_vm(self, template_vm, os_family, name, ip, size_mem_mib, num_vcpus):
+  def create_vm(self,
+      cluster_uuid,
+      template_vm,
+      os_family,
+      name,
+      ip,
+      size_mem_mib,
+      num_vcpus):
     userdata = CLOUDINIT_MAP.get(os_family).replace("<desired-ip>", ip).replace("<desired-hostname>", name)
     metadata = json.dumps({
       "uuid": name,
@@ -1456,7 +1465,7 @@ class AplosClient(object):
       "name": name,
       "cluster_reference": {
         "kind": "cluster",
-        "uuid": CLUSTER_UUID,
+        "uuid": cluster_uuid,
       },
       "resources": {
         "parent_reference": {
