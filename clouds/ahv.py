@@ -870,13 +870,17 @@ def create(vm_, call=None):
   logg = _attach_vm_context(vm_)
   logg.info("Creating instance ...")
 
+  clone_from = vm_["clone_from"]
   vm_name = vm_["name"]
   ipaddr = vm_["network"].values()[0]["ip"]
+  os_family = vm_["os_family"]
 
   logg.debug("Requesting Prism clone_vm ...")
   RequestingInstanceEvent(vm_).fire()
   QueryingInstanceEvent(vm_).fire()
   task_json = conn.clone_vm(
+    clone_from=clone_from,
+    os_family=os_family,
     vm_name=vm_name,
     vm_ip=ipaddr,
     size_mem_mib=2048,
@@ -1119,12 +1123,7 @@ def show_instance(name, call=None):
 CLUSTER_UUID = "0005419d-d510-424c-0000-00000000b3b0"
 NETWORK_UUID = "74e481f9-275d-4c65-89cc-705c16248450"
 
-TMPL_UUID_MAP = {
-  "centos-7.4": "108a0510-7c4c-4ee3-8674-92c8afcbf6ce",
-  "ubuntu-16.04": "fb31e4ba-4c5d-449e-afb0-f242d075d9cc"
-}
-
-CENTOS_CLOUD_CFG=r"""#cloud-config
+CENTOS7_CLOUD_CFG=r"""#cloud-config
 write_files:
   - path: /etc/sysconfig/network-scripts/ifcfg-eth0
     owner: root:root
@@ -1217,8 +1216,8 @@ system_info:
 """
 
 CLOUDINIT_MAP = {
-  "centos-7.4": CENTOS_CLOUD_CFG,
-  "ubuntu-16.04": UBUNTU_CLOUD_CFG
+  "centos-7": CENTOS7_CLOUD_CFG,
+  "ubuntu": UBUNTU_CLOUD_CFG
 }
 
 # ===========================================================================
@@ -1381,21 +1380,18 @@ class AplosClient(object):
   # =========================================================================
   # commands
   # =========================================================================
-  def clone_vm(self, vm_name, vm_ip, size_mem_mib, num_vcpus):
-    os_key = "centos-7.4"
-
-    tmpl_uuid = TMPL_UUID_MAP.get(os_key)
-
-    (status, result) = self.get_vm(tmpl_uuid)
+  def clone_vm(self, clone_from, os_family, vm_name, vm_ip, size_mem_mib, num_vcpus):
+    logger.info("Looking for template {}".format(clone_from))
+    status, result = self.get_vm_by_name(clone_from)
     if status >= 300:
-      logger.error("Failed to retrieve info for template {}".format(tmpl_uuid))
+      logger.error("Failed to fetch info for template {}".format(clone_from))
       AplosUtil.print_failure(result)
       return False
 
     template_vm = AplosVmStatus.from_dict(result)
     logger.info("Cloning VM from template {}".format(template_vm.name))
 
-    status, result = self.create_vm(template_vm, vm_name, vm_ip, os_key, size_mem_mib, num_vcpus)
+    status, result = self.create_vm(template_vm, os_family, vm_name, vm_ip, size_mem_mib, num_vcpus)
     if str(status) == "408":
       logger.error(json.dumps(result.get("message_list"), indent=2))
       return False
@@ -1403,7 +1399,7 @@ class AplosClient(object):
     logger.info("{}\n{}".format(status, json.dumps(result, indent=2)))
     # Track if the VM is created
     if status == 202:
-      vm_uuid = AplosUtil.track_request(status, result, self.get_vm)
+      vm_uuid = AplosUtil.track_request(status, result, self.get_vm_by_uuid)
       if not vm_uuid:
         logger.error("Failed to create VM {}".format(vm_name))
         return
@@ -1415,7 +1411,7 @@ class AplosClient(object):
     logger.info("Cloned VM {} with uuid {}".format(vm_name, vm_uuid))
 
     # Get the VM info.
-    (status, result) = self.get_vm(vm_uuid)
+    status, result = self.get_vm_by_uuid(vm_uuid)
     if status == 200:
       logger.info("VM: {}".format(json.dumps(result, indent=2)))
     else:
@@ -1425,14 +1421,30 @@ class AplosClient(object):
 
     return True
 
-  def get_vm(self, vm_uuid):
-    """ Get a VM with particular UUID """
-    endpoint = "vms/{}".format(vm_uuid)
+  def get_vm_by_name(self, name):
+    """ Get a VM by its name """
+    endpoint = "vms/list"
+    body = {
+      "filter": "vm_name==" + name
+    }
+    status, result = self.POST(endpoint=endpoint, body=body)
+
+    entities = result.get("entities")
+    if len(entities) > 1:
+      raise SaltCloudSystemExit("multiple VMs with name {}".format(name))
+    if len(entities) < 1:
+      raise SaltCloudNotFound("no VM with name {}".format(name))
+
+    return status, entities[0]
+
+  def get_vm_by_uuid(self, uuid):
+    """ Get a VM by its UUID """
+    endpoint = "vms/{}".format(uuid)
     status, result = self.GET(endpoint=endpoint)
     return status, result
 
-  def create_vm(self, template_vm, name, ip, os_key, size_mem_mib, num_vcpus):
-    userdata = CLOUDINIT_MAP.get(os_key).replace("<desired-ip>", ip).replace("<desired-hostname>", name)
+  def create_vm(self, template_vm, os_family, name, ip, size_mem_mib, num_vcpus):
+    userdata = CLOUDINIT_MAP.get(os_family).replace("<desired-ip>", ip).replace("<desired-hostname>", name)
     metadata = json.dumps({
       "uuid": name,
       "network": {
