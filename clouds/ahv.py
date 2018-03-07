@@ -1291,7 +1291,9 @@ def list_nodes(*args, **kwargs):
   conn = get_conn(version=3)
   vms = conn.list_vms()
 
-  result = dict((vm.name, vm.to_summary()) for vm in vms)
+  result = dict((vm.name, vm.to_summary())
+    for vm in vms if vm.tags.get("is_template") is not True
+  )
   return result
 
 def show_instance(name, call=None):
