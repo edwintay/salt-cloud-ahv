@@ -305,87 +305,6 @@ class DestroyedInstanceEvent(Event):
 
 
 #==============================================================================
-# REST API Client
-#==============================================================================
-
-class LegacyClient(object):
-  """
-  Client for the Prism v1 REST API and v0.8 management REST API.
-  """
-
-  #============================================================================
-  # Decorators
-  #============================================================================
-  def entity_list(func):
-    # pylint: disable=no-self-argument
-    """
-    Decorator for REST API endpoints corresponding to a collection of entities.
-    """
-    @functools.wraps(func)
-    def _wrapped(*args, **kwargs):
-      # pylint: disable=not-callable
-      try:
-        resp = func(*args, **kwargs).json()
-      except Exception as exc:
-        raise SaltCloudExecutionFailure(str(exc))
-
-      if "entities" not in resp:
-        raise SaltCloudExecutionFailure()
-
-      return resp["entities"]
-
-    return _wrapped
-
-  #============================================================================
-  # Init
-  #============================================================================
-
-  def __init__(self, host, user, password, port=9440,
-               base_path="/PrismGateway/services/rest/v1",
-               base_mgmt_path="/api/nutanix/v0.8",
-               verify_ssl=True):
-    # requests.Session to use for communicating with Prism.
-    self._session = requests.Session()
-    self._session.auth = (user, password)
-    self._session.headers["Content-Type"] = "application/json;charset=UTF-8"
-
-    # Base URL for the Prism host.
-    self._base_url = "https://%s:%d" % (host, port)
-    # Base path for v1 Prism REST API
-    self._base_path = base_path
-    # Base path for v0.8 Prism management REST API
-    self._base_mgmt_path = base_mgmt_path
-
-    self.verify_ssl = verify_ssl
-
-  #============================================================================
-  # Public APIs (mgmt v0.8)
-  #============================================================================
-
-  @entity_list
-  def images_get(self):
-    return self._get("%s/images" % self._base_mgmt_path)
-
-  #============================================================================
-  # Protected util methods
-  #============================================================================
-
-  def _get(self, path, params=None):
-    return self._issue_request(
-      "GET", "%s/%s" % (self._base_url, path), params=params)
-
-  def _issue_request(self, verb, url, data=None, params=None):
-    func = getattr(self._session, verb.lower())
-    if not func:
-      raise SaltCloudSystemExit("Invalid HTTP method '%s'" % verb)
-
-    return func(url,
-      data=data,
-      params=params if params else {},
-      verify=self.verify_ssl
-    )
-
-#==============================================================================
 # Utils
 #==============================================================================
 def get_conn(version=2):
@@ -642,24 +561,6 @@ def avail_locations(*args, **kwargs):
       if cluster.has_pe and cluster.has_ahv
   )
   return result
-
-def avail_images(call=None):
-  """
-  List available VM images.
-
-  Args:
-    call (str|None): Method by which this functions is being invoked.
-
-  Returns:
-    (dict<str,dict>): Map of image names to image metadata for all images
-      known to the image service.
-  """
-  if call != "function" and call is not None:
-    raise SaltCloudSystemExit("The avail_images function must be called "
-      "with -f or --function, or with the --list-images option.")
-
-  conn = get_conn()
-  return dict((img["name"], img) for img in conn.images_get())
 
 def avail_sizes(*args, **kwargs):
   """
