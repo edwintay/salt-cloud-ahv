@@ -14,7 +14,7 @@ Nutanix AHV Module
 The Nutanix AHV module allows you to interface with a Nutanix AHV cluster to
 perform simple CRUD of guest VMs.
 
-:depends: requests >= 2.6.0
+:depends: requests >= 2.6.0, python-netaddr >= 0.7.18
 
 To use this module, set up the AHV cluster configuration at
 ``/etc/salt/cloud.providers`` or
@@ -35,8 +35,10 @@ Globals injected by salt
 
 import base64
 import functools
+import jinja2
 import json
 import logging
+import netaddr
 import time
 import urllib
 
@@ -108,6 +110,109 @@ def _attach_vm_context(vm_):
   return VmContextAdapter(logger, {
     "vmname": vm_["name"]
   })
+
+
+
+#==============================================================================
+# templates
+#==============================================================================
+CLOUDCFG_TMPL_STR = r"""#cloud-config
+hostname: {{ hostname }}
+fqdn: {{ hostname }}.{{ domain }}
+write_files:
+  {% for fpath, fcontent in netfiles.items() -%}
+  - path: {{ fpath }}
+    owner: root:root
+    permissions: '0644'
+    content: |
+      {{ fcontent | indent(6) }}
+  {%- endfor %}
+
+bootcmd:
+  {% if resolvconf_files -%}
+  - rm -f {{ resolvconf_files | join(" ") }}
+  {%- endif %}
+  - ifdown eth0 && ifup eth0
+  - ip -o -4 addr list eth0 | awk '{ print $4 }' | cut -d/ -f1 |
+    awk '{ printf "\n%-11s %-31s %s\n", $1, "{{ hostname }}.{{ domain }}", "{{ hostname }}"}' >> /etc/hosts
+runcmd:
+  - touch /etc/cloud/cloud-init.disabled
+
+datasource_list:
+  - ConfigDrive
+cloud_init_modules:
+  - write_files
+  - bootcmd
+cloud_config_modules:
+  - set_hostname
+  - runcmd
+  - scripts_user
+cloud_final_modules:
+  - final_message
+"""
+NETCFG_REDHAT = r"""
+DEVICE={{ device }}
+TYPE=Ethernet
+DEFROUTE=yes
+NM_CONTROLLED=no
+IPV4_FAILURE_FATAL=yes
+IPV6INIT=no
+ONBOOT=yes
+
+BOOTPROTO=none
+IPADDR={{ ipaddr }}
+PREFIX={{ prefix }}
+GATEWAY={{ gateway }}
+{% for server in dns_servers -%}
+DNS{{ loop.index }}={{ server }}
+{% endfor -%}
+SEARCH="{{ search_domains | join(" ") }}"
+"""
+NETCFG_DEBIAN = r"""
+# This file describes the network interfaces available on your system
+# and how to activate them. For more information, see interfaces(5).
+
+source /etc/network/interfaces.d/*
+
+# The loopback network interface
+auto lo
+iface lo inet loopback
+
+# The primary network interface
+auto eth0
+iface eth0 inet static
+  address {{ ipaddr }}
+  netmask {{ netmask }}
+  gateway {{ gateway }}
+  dns-nameservers {{ dns_servers | join(" ") }}
+  dns-search {{ search_domains | join(" ") }}
+"""
+
+class Distro(object):
+  cloud_tmpl_str = CLOUDCFG_TMPL_STR
+  resolvconf_files = ()
+  netcfg_tmpls = {}
+
+class RedhatDistro(Distro):
+  resolvconf_files = (
+    "/etc/resolv.conf",
+  )
+  netcfg_tmpls = {
+    "/etc/sysconfig/network-scripts/ifcfg-eth0": NETCFG_REDHAT
+  }
+
+class UbuntuDistro(Distro):
+  resolvconf_files = (
+    "/run/resolvconf/resolv.conf",
+   )
+  netcfg_tmpls = {
+    "/etc/network/interfaces": NETCFG_DEBIAN
+  }
+
+DISTRO_MAP = {
+  "rhel": RedhatDistro,
+  "ubuntu": UbuntuDistro
+}
 
 
 
@@ -886,11 +991,12 @@ def is_profile_configured(opts, provider, profile, vm_=None):
   required_keys = [
     "provider",
     "clone_from",
-    "os_family",
     "num_vcpus",
     "num_cores_per_vcpu",
     "memory_size_mib",
-    "network"
+    "domain",
+    "network",
+    "distro_family"
   ]
 
   alias, driver = provider.split(":")
@@ -950,7 +1056,6 @@ def create(vm_, call=None):
   cluster_uuid = vm_["cluster_uuid"]
   clone_from = vm_["clone_from"]
   vm_name = vm_["name"]
-  os_family = vm_["os_family"]
   nics = vm_["network"]
   power_on = vm_["power_on"]
 
@@ -958,15 +1063,19 @@ def create(vm_, call=None):
   RequestingInstanceEvent(vm_).fire()
   QueryingInstanceEvent(vm_).fire()
 
+  userdata = conn.generate_cloudinit_userdata(vm_)
+  metadata = conn.generate_cloudinit_metadata(vm_)
+
   vm_data = conn.clone_vm(
     cluster_uuid=cluster_uuid,
     clone_from=clone_from,
-    os_family=os_family,
     vm_name=vm_name,
     nics=nics,
     memory_size_mib=vm_["memory_size_mib"],
     num_vcpus=vm_["num_vcpus"],
-    num_cores_per_vcpu=vm_["num_cores_per_vcpu"]
+    num_cores_per_vcpu=vm_["num_cores_per_vcpu"],
+    userdata=userdata,
+    metadata=metadata
   )
   logg.debug("VM clone complete")
 
@@ -1228,103 +1337,6 @@ def show_instance(name, call=None):
 # ===========================================================================
 # Prism v3 client
 # ===========================================================================
-CENTOS7_CLOUD_CFG=r"""#cloud-config
-write_files:
-  - path: /etc/sysconfig/network-scripts/ifcfg-eth0
-    owner: root:root
-    permissions: '0644'
-    content: |
-      DEVICE=eth0
-      TYPE=Ethernet
-      DEFROUTE=yes
-      NM_CONTROLLED=no
-      IPV4_FAILURE_FATAL=yes
-      IPV6INIT=no
-      ONBOOT=yes
-
-      BOOTPROTO=none
-      IPADDR=<desired-ip>
-      PREFIX=24
-      GATEWAY=10.4.10.1
-      DNS1=10.4.8.15
-      DNS2=10.4.8.16
-      DOMAIN="it.nutanix.com corp.nutanix.com nutanix.com"
-
-bootcmd:
-  - rm -f /etc/resolv.conf*
-  - ifdown eth0 && ifup eth0
-  - ip -o -4 addr list eth0 | awk '{ print $4 }' | cut -d/ -f1 | awk '{ printf "\n%-11s %-31s %s\n", $1, "<desired-hostname>.it.nutanix.com", "<desired-hostname>"}' >> /etc/hosts
-runcmd:
-  - hostnamectl set-hostname <desired-hostname>.it.nutanix.com
-  - touch /etc/cloud/cloud-init.disabled
-
-datasource_list:
-  - ConfigDrive
-cloud_init_modules:
-  - write_files
-  - bootcmd
-cloud_config_modules:
-  - runcmd
-  - scripts_user
-cloud_final_modules:
-  - final_message
-"""
-
-UBUNTU_CLOUD_CFG=r"""#cloud-config
-hostname: <desired-hostname>
-fqdn: <desired-hostname>.it.nutanix.com
-write_files:
-  - path: /etc/network/interfaces
-    owner: root:root
-    permissions: '0644'
-    content: |
-      # This file describes the network interfaces available on your system
-      # and how to activate them. For more information, see interfaces(5).
-
-      source /etc/network/interfaces.d/*
-
-      # The loopback network interface
-      auto lo
-      iface lo inet loopback
-
-      # The primary network interface
-      auto eth0
-      iface eth0 inet static
-        address <desired-ip>
-        netmask 255.255.255.0
-        gateway 10.4.10.1
-        dns-nameservers 10.4.8.15 10.4.8.16
-        dns-search it.nutanix.com corp.nutanix.com nutanix.com
-
-bootcmd:
-  - rm -f /run/resolvconf/resolv.conf
-  - ifdown eth0 && ifup eth0
-  - ip -o -4 addr list eth0 | awk '{ print $4 }' | cut -d/ -f1 |
-    awk '{ printf "\n%-11s %-31s %s\n", $1, "<desired-hostname>.it.nutanix.com", "<desired-hostname>"}' >> /etc/hosts
-runcmd:
-  - touch /etc/cloud/cloud-init.disabled
-
-datasource_list:
-  - ConfigDrive
-cloud_init_modules:
-  - write_files
-  - bootcmd
-  - set_hostname
-cloud_config_modules:
-  - runcmd
-  - scripts_user
-cloud_final_modules:
-  - final_message
-
-system_info:
-  distro: ubuntu
-"""
-
-CLOUDINIT_MAP = {
-  "centos-7": CENTOS7_CLOUD_CFG,
-  "ubuntu": UBUNTU_CLOUD_CFG
-}
-
 # ===========================================================================
 # api entities
 # ===========================================================================
@@ -1662,12 +1674,15 @@ class AplosClient(object):
   def clone_vm(self,
       cluster_uuid,
       clone_from,
-      os_family,
       vm_name,
       nics=None,
       memory_size_mib=2048,
       num_vcpus=2,
-      num_cores_per_vcpu=1):
+      num_cores_per_vcpu=1,
+      userdata=None,
+      metadata=None
+    ):
+
     logger.info("Looking for template {}".format(clone_from))
     status, result = self.get_vm_by_name(clone_from)
     if status >= 300:
@@ -1682,11 +1697,11 @@ class AplosClient(object):
       cluster_uuid,
       template_vm,
       vm_name,
-      os_family=os_family,
-      nics=nics,
       memory_size_mib=memory_size_mib,
       num_vcpus=num_vcpus,
-      num_cores_per_vcpu=num_cores_per_vcpu
+      num_cores_per_vcpu=num_cores_per_vcpu,
+      userdata=userdata,
+      metadata=metadata
     )
     if status >= 300:
       logger.error(json.dumps(result, indent=2))
@@ -1770,22 +1785,11 @@ class AplosClient(object):
       cluster_uuid,
       template_vm,
       vm_name,
-      os_family,
-      nics,
       memory_size_mib=2048,
       num_vcpus=2,
-      num_cores_per_vcpu=1):
-
-    static_ip = defaultdict(dict, nics)["nic.0"]["ipaddr"]
-    userdata = CLOUDINIT_MAP.get(os_family).replace(
-        "<desired-ip>", static_ip).replace(
-        "<desired-hostname>", vm_name)
-    metadata = json.dumps({
-      "uuid": vm_name,
-      "network": {
-        "config": "disabled"
-      }
-    })
+      num_cores_per_vcpu=1,
+      userdata=None,
+      metadata=None):
 
     spec = {
       "name": vm_name,
@@ -1996,3 +2000,84 @@ class AplosClient(object):
       return
 
     return vm_data
+
+  def generate_cloudinit_userdata(self, vm_):
+    network = defaultdict(dict, vm_)["network"]
+    distro_family = vm_["distro_family"]
+    netfiles = self.generate_cloudinit_netfiles(vm_)
+
+    hostname = vm_.get("hostname") or vm_["name"]
+    domain = vm_["domain"]
+    distro_family = vm_["distro_family"]
+
+    distro = DISTRO_MAP.get(distro_family)
+    if not distro:
+      raise SaltCloudSystemExit("Unknown distro family {0}".format(
+        distro_family
+      ))
+
+    tmpl_cloud_cfg = jinja2.Template(distro.cloud_tmpl_str)
+    cloud_cfg_str = tmpl_cloud_cfg.render({
+      "hostname": hostname,
+      "domain": domain,
+      "netfiles": netfiles,
+      "distro_family": distro_family,
+      "resolvconf_files": distro.resolvconf_files
+    })
+    logger.debug("cloudinit userdata: {0}".format(cloud_cfg_str))
+
+    return cloud_cfg_str
+
+  def generate_cloudinit_netfiles(self, vm_):
+    network = defaultdict(dict, vm_)["network"]
+    distro_family = vm_["distro_family"]
+    dns_servers = vm_["dns_servers"]
+    search_domains = vm_["search_domains"]
+
+    # Configure cloudinit network if nic.0 is specified
+    # TODO: Support more than one interface
+    netfiles = {} # file path, file content
+    if "nic.0" in network:
+      eth0 = network["nic.0"]
+
+      ipaddr = eth0["ipaddr"]
+      prefix = eth0["prefix"]
+      gateway = eth0["gateway"]
+      cidr = netaddr.IPNetwork("{0}/{1}".format(ipaddr, prefix))
+
+      distro = DISTRO_MAP.get(distro_family)
+      if not distro:
+        raise SaltCloudSystemExit("Unknown distro family {0}".format(
+          distro_family
+        ))
+
+      for path, tmpl_str in distro.netcfg_tmpls.items():
+        tmpl_net_cfg = jinja2.Template(tmpl_str)
+        net_cfg_str = tmpl_net_cfg.render({
+          "device": "eth0",
+          "ipaddr": ipaddr,
+          "prefix": prefix,
+          "netmask": cidr.netmask,
+          "gateway": gateway,
+          "dns_servers": dns_servers,
+          "search_domains": search_domains
+        })
+        netfiles[path] = net_cfg_str
+        logger.debug("netcfg: {0}\n{1}".format(path, net_cfg_str))
+
+    return netfiles
+
+  def generate_cloudinit_metadata(self, vm_):
+    hostname = vm_.get("hostname") or vm_["name"]
+    domain = vm_["domain"]
+    fqdn = "{0}.{1}".format(hostname, domain)
+
+    metadata = json.dumps({
+      "uuid": fqdn,
+      "network": {
+        "config": "disabled"
+      }
+    })
+    logger.debug("cloudinit metadata: {0}".format(metadata))
+
+    return metadata
