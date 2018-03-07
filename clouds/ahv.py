@@ -900,20 +900,23 @@ def is_profile_configured(opts, provider, profile, vm_=None):
 
   return True
 
+class CreateResult(object):
+  def __init__(self):
+    self.created = False
+    self.powered_on = False
+    self.bootstrapped = False
 
+  def __iter__(self):
+    return self.__dict__.iteritems()
 
 def create(vm_, call=None):
-  result = {
-    "created": False,
-    "powered": False,
-    "bootstrapped": False
-  }
+  result = CreateResult()
 
   if vm_["profile"] and not is_profile_configured(__opts__,
       __active_provider_name__ or __virtualname__,
       vm_["profile"],
       vm_=vm_):
-    return result
+    return dict(result)
 
   CreatingInstanceEvent(vm_).fire()
   conn = get_conn(version=3)
@@ -925,28 +928,57 @@ def create(vm_, call=None):
   clone_from = vm_["clone_from"]
   vm_name = vm_["name"]
   os_family = vm_["os_family"]
+  nics = vm_["network"]
+  power_on = vm_["power_on"]
 
   logg.debug("Requesting Prism clone_vm ...")
   RequestingInstanceEvent(vm_).fire()
   QueryingInstanceEvent(vm_).fire()
-  task_json = conn.clone_vm(
+
+  vm_data = conn.clone_vm(
     cluster_uuid=cluster_uuid,
     clone_from=clone_from,
     os_family=os_family,
     vm_name=vm_name,
-    nics=vm_["network"],
+    nics=nics,
     memory_size_mib=vm_["memory_size_mib"],
     num_vcpus=vm_["num_vcpus"],
-    num_cores_per_vcpu=vm_["num_cores_per_vcpu"],
-    power_on=vm_["power_on"]
+    num_cores_per_vcpu=vm_["num_cores_per_vcpu"]
   )
   logg.debug("VM clone complete")
 
+  if not vm_data:
+    logg.error("Failed to clone VM")
+    return dict(result)
+
+  # Reboot VM for cloudinit
+  vm_ip = nics.values()[0]["ip"]
+  vm_data = conn.reboot_for_cloudinit(vm_ip,
+    vm_["ssh_username"],
+    vm_["password"],
+    vm_data
+  )
+  if not vm_data:
+    logg.error("Failed to reboot for cloudinit")
+    return dict(result)
+  logg.info("Configured OS with cloudinit")
+
+  # Power on VM if requested
+  vm_data = conn.finalize_vm(vm_data, power_on)
+  if not vm_data:
+    logg.error("Failed final power on")
+    return dict(result)
+  logg.info("Final power on {}".format(
+    "completed" if power_on else "skipped"
+  ))
+  result.powered_on = power_on
+
+  # Done
   logg.info("VM created")
-  result["created"] = True
+  result.created = True
   CreatedInstanceEvent(vm_).fire()
 
-  return result
+  return dict(result)
 
 def _create(vm_, call=None):
   """
@@ -1585,8 +1617,7 @@ class AplosClient(object):
       nics=None,
       memory_size_mib=2048,
       num_vcpus=2,
-      num_cores_per_vcpu=1,
-      power_on=True):
+      num_cores_per_vcpu=1):
     logger.info("Looking for template {}".format(clone_from))
     status, result = self.get_vm_by_name(clone_from)
     if status >= 300:
@@ -1611,7 +1642,6 @@ class AplosClient(object):
       logger.error(json.dumps(result, indent=2))
       return False
 
-    logger.debug("{}\n{}".format(status, json.dumps(result, indent=2)))
     # Track if the VM is created
     if status == 202:
       vm_data = AplosUtil.track_request(status, result, self.get_vm_by_uuid)
@@ -1633,7 +1663,6 @@ class AplosClient(object):
       AplosUtil.print_failure(result)
       return
 
-    logger.debug("{}\n{}".format(status, json.dumps(result, indent=2)))
     # Track if network has been configured
     if status == 202:
       vm_data = AplosUtil.track_request(status, result, self.get_vm_by_uuid)
@@ -1647,18 +1676,7 @@ class AplosClient(object):
 
     logger.info("Configured network for {}".format(vm_name))
 
-    # Power-on and reboot for cloudinit
-
-    # Final VM configuration
-    status, result = self.get_vm_by_uuid(vm_uuid)
-    if status == 200:
-      logger.info("VM: {}".format(json.dumps(result, indent=2)))
-    else:
-      logger.error("Failed to get the information for vm {}".format(vm_uuid))
-      AplosUtil.print_failure(result)
-      return
-
-    return True
+    return vm_data
 
   def get_network_by_name(self, name):
     """ Get a network by its name """
@@ -1781,7 +1799,7 @@ class AplosClient(object):
 
     spec = vm_data["spec"]
     spec["resources"]["nic_list"] = nic_list
-    spec["resources"]["power_state"] = "ON"
+    spec["resources"]["power_state"] = "OFF"
     spec_version = defaultdict(dict, vm_data)["metadata"].get("spec_version")
     body = {
       "api_version": "3.0",
@@ -1797,3 +1815,100 @@ class AplosClient(object):
 
     status, result = self.PUT(endpoint=endpoint, body=body)
     return status, result
+
+  def reboot_for_cloudinit(self, vm_host, ssh_username, ssh_password, vm_data):
+    logger.info("Powering on VM to initiate cloudinit")
+    spec = AplosVmSpec.from_dict(vm_data)
+    spec.power_state = APLOS_POWER_STATE_ON
+    body = {
+      "api_version": "3.0",
+      "metadata": {
+        "kind": "vm",
+        "spec_version": spec.version
+      },
+      "spec": spec.to_dict()
+    }
+    endpoint="vms/{}".format(spec.uuid)
+    status, result = self.PUT(endpoint=endpoint, body=body)
+    if status >= 300:
+      logger.error("Failed to power on {} for cloudinit".format(spec.uuid))
+      AplosUtil.print_failure(result)
+      return
+    if status == 202:
+      vm_data = AplosUtil.track_request(status, result, self.get_vm_by_uuid)
+      if not vm_data:
+        return
+    else:
+      AplosUtil.print_failure(result)
+      return
+
+    logger.info("Waiting for SSH")
+    salt.utils.cloud.wait_for_passwd(vm_host,
+      username=ssh_username,
+      password=ssh_password,
+      maxtries=1
+    )
+    logger.info("SSH initialized")
+
+    # Shutdown VM and remove cloudinit disk
+    logger.info("Shutting down VM and removing cloudinit disk")
+    spec = AplosVmSpec.from_dict(vm_data)
+    spec.power_state = APLOS_POWER_STATE_OFF
+    spec.disks = [ disk for disk in spec.disks if disk != CLOUDINIT_DISK ]
+    body = {
+      "api_version": "3.0",
+      "metadata": {
+        "kind": "vm",
+        "spec_version": spec.version
+      },
+      "spec": spec.to_dict()
+    }
+    endpoint="vms/{}".format(spec.uuid)
+    status, result = self.PUT(endpoint=endpoint, body=body)
+    if status >= 300:
+      logger.error("Failed to remove cloudinit disk".format(spec.uuid))
+      AplosUtil.print_failure(result)
+      return
+    if status == 202:
+      vm_data = AplosUtil.track_request(status, result, self.get_vm_by_uuid)
+      if not vm_data:
+        return
+    else:
+      AplosUtil.print_failure(result)
+      return
+
+    return vm_data
+
+  def finalize_vm(self, vm_data, power_on):
+    logger.info("Finalizing VM")
+    desired_power_state = AplosPowerState(power_on)
+    spec = AplosVmSpec.from_dict(vm_data)
+
+    if spec.power_state == desired_power_state:
+      # already at desired power state
+      return vm_data
+
+    spec.power_state = desired_power_state
+    body = {
+      "api_version": "3.0",
+      "metadata": {
+        "kind": "vm",
+        "spec_version": spec.version
+      },
+      "spec": spec.to_dict()
+    }
+    endpoint="vms/{}".format(spec.uuid)
+    status, result = self.PUT(endpoint=endpoint, body=body)
+    if status >= 300:
+      logger.error("Failed to power on {} as requested".format(spec.uuid))
+      AplosUtil.print_failure(result)
+      return
+    if status == 202:
+      vm_data = AplosUtil.track_request(status, result, self.get_vm_by_uuid)
+      if not vm_data:
+        return
+    else:
+      AplosUtil.print_failure(result)
+      return
+
+    return vm_data
