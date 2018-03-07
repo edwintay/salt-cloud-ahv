@@ -5,6 +5,8 @@ Salt Cloud driver for Nutanix AHV
 
 # Table of Contents
 1. [Installation](#install)
+1. [Configuration](#configure)
+    1. [salt-cloud](#configure-salt-cloud)
 
 
 
@@ -21,3 +23,14 @@ On salt master,
     ...
     extension_modules: /path/to/local/clone
     ...
+```
+
+
+
+# <a name="configure" />Configuration
+
+## <a name="configure-salt-cloud" />salt-cloud
+See
+* [provider](doc/samples/ahv.provider.conf)
+* [profile](doc/samples/ahv.provider.conf)
+* [map](doc/samples/ahv.map.conf)
