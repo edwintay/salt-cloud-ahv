@@ -886,8 +886,9 @@ def create(vm_, call=None):
     os_family=os_family,
     vm_name=vm_name,
     vm_ip=ipaddr,
-    size_mem_mib=2048,
-    num_vcpus=2,
+    memory_size_mib=vm_["memory_size_mib"],
+    num_vcpus=vm_["num_vcpus"],
+    num_cores_per_vcpu=vm_["num_cores_per_vcpu"],
     power_on=vm_["power_on"]
   )
   logg.debug("VM clone complete")
@@ -1078,7 +1079,7 @@ def avail_sizes(*args, **kwargs):
     "<num_vcpus>": "Number of vCPUs with which to configure the VM",
     "<num_cores_per_vcpu>":
       "Number of cores with which to configure each vCPU",
-    "<memory_mb>": "Amount (in MB) of RAM with which to configure the VM",
+    "<memory_size_mib>": "Size of VM memory (in MiB)",
   }
 
 def list_nodes(call=None):
@@ -1389,8 +1390,9 @@ class AplosClient(object):
       os_family,
       vm_name,
       vm_ip,
-      size_mem_mib,
-      num_vcpus,
+      memory_size_mib=2048,
+      num_vcpus=2,
+      num_cores_per_vcpu=1,
       power_on=True):
     logger.info("Looking for template {}".format(clone_from))
     status, result = self.get_vm_by_name(clone_from)
@@ -1408,9 +1410,10 @@ class AplosClient(object):
       os_family,
       vm_name,
       vm_ip,
-      size_mem_mib,
-      num_vcpus,
-      power_on
+      memory_size_mib=memory_size_mib,
+      num_vcpus=num_vcpus,
+      num_cores_per_vcpu=num_cores_per_vcpu,
+      power_on=power_on
     )
     if str(status) == "408":
       logger.error(json.dumps(result.get("message_list"), indent=2))
@@ -1469,8 +1472,9 @@ class AplosClient(object):
       os_family,
       name,
       ip,
-      size_mem_mib,
-      num_vcpus,
+      memory_size_mib=2048,
+      num_vcpus=2,
+      num_cores_per_vcpu=1,
       power_on=True):
     userdata = CLOUDINIT_MAP.get(os_family).replace("<desired-ip>", ip).replace("<desired-hostname>", name)
     metadata = json.dumps({
@@ -1505,8 +1509,8 @@ class AplosClient(object):
         ],
         "power_state": power_state,
         "num_sockets": int(num_vcpus),
-        "num_vcpus_per_socket": 1,
-        "memory_size_mib": int(size_mem_mib),
+        "num_vcpus_per_socket": int(num_cores_per_vcpu),
+        "memory_size_mib": int(memory_size_mib),
         "guest_customization": {
           "cloud_init": {
             "meta_data": base64.b64encode(metadata),
