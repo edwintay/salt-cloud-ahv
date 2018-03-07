@@ -866,7 +866,8 @@ def is_profile_configured(opts, provider, profile, vm_=None):
     "os_family",
     "num_vcpus",
     "num_cores_per_vcpu",
-    "memory_size_mib"
+    "memory_size_mib",
+    "network"
   ]
 
   alias, driver = provider.split(":")
@@ -923,7 +924,6 @@ def create(vm_, call=None):
   cluster_uuid = vm_["cluster_uuid"]
   clone_from = vm_["clone_from"]
   vm_name = vm_["name"]
-  ipaddr = vm_["network"].values()[0]["ip"]
   os_family = vm_["os_family"]
 
   logg.debug("Requesting Prism clone_vm ...")
@@ -934,7 +934,7 @@ def create(vm_, call=None):
     clone_from=clone_from,
     os_family=os_family,
     vm_name=vm_name,
-    vm_ip=ipaddr,
+    nics=vm_["network"],
     memory_size_mib=vm_["memory_size_mib"],
     num_vcpus=vm_["num_vcpus"],
     num_cores_per_vcpu=vm_["num_cores_per_vcpu"],
@@ -1174,8 +1174,6 @@ def show_instance(name, call=None):
 # ===========================================================================
 # Prism v3 client
 # ===========================================================================
-NETWORK_UUID = "74e481f9-275d-4c65-89cc-705c16248450"
-
 CENTOS7_CLOUD_CFG=r"""#cloud-config
 write_files:
   - path: /etc/sysconfig/network-scripts/ifcfg-eth0
@@ -1363,7 +1361,7 @@ class AplosUtil(object):
         end_time = time.time()
         time_taken = end_time - start_time
         logger.info("Time to completion (seconds): {:.2f}".format(time_taken))
-        return uuid
+        return result
 
       (status, result) = status_fn(uuid)
       time.sleep(status_wait_secs)
@@ -1430,6 +1428,9 @@ class AplosClient(object):
   def POST(self, *args, **kwargs):
     return self.request("POST", *args, **kwargs)
 
+  def PUT(self, *args, **kwargs):
+    return self.request("PUT", *args, **kwargs)
+
   # =========================================================================
   # commands
   # =========================================================================
@@ -1438,7 +1439,7 @@ class AplosClient(object):
       clone_from,
       os_family,
       vm_name,
-      vm_ip,
+      nics=None,
       memory_size_mib=2048,
       num_vcpus=2,
       num_cores_per_vcpu=1,
@@ -1456,33 +1457,56 @@ class AplosClient(object):
     status, result = self.create_vm(
       cluster_uuid,
       template_vm,
-      os_family,
       vm_name,
-      vm_ip,
+      os_family=os_family,
+      nics=nics,
       memory_size_mib=memory_size_mib,
       num_vcpus=num_vcpus,
-      num_cores_per_vcpu=num_cores_per_vcpu,
-      power_on=power_on
+      num_cores_per_vcpu=num_cores_per_vcpu
     )
-    if str(status) == "408":
-      logger.error(json.dumps(result.get("message_list"), indent=2))
+    if status >= 300:
+      logger.error(json.dumps(result, indent=2))
       return False
 
-    logger.info("{}\n{}".format(status, json.dumps(result, indent=2)))
+    logger.debug("{}\n{}".format(status, json.dumps(result, indent=2)))
     # Track if the VM is created
     if status == 202:
-      vm_uuid = AplosUtil.track_request(status, result, self.get_vm_by_uuid)
-      if not vm_uuid:
+      vm_data = AplosUtil.track_request(status, result, self.get_vm_by_uuid)
+      if not vm_data:
         logger.error("Failed to create VM {}".format(vm_name))
         return
     else:
       logger.error("Failed to create VM {}".format(vm_name))
       AplosUtil.print_failure(result)
       return
-
+    vm_uuid = defaultdict(dict, vm_data)["metadata"].get("uuid")
     logger.info("Cloned VM {} with uuid {}".format(vm_name, vm_uuid))
 
-    # Get the VM info.
+    # Configure network
+    logger.info("Configuring network for VM")
+    status, result = self.configure_vm_network(vm_data, nics=nics)
+    if status >= 300:
+      logger.error("Failed to configure network for vm {}".format(vm_uuid))
+      AplosUtil.print_failure(result)
+      return
+
+    logger.debug("{}\n{}".format(status, json.dumps(result, indent=2)))
+    # Track if network has been configured
+    if status == 202:
+      vm_data = AplosUtil.track_request(status, result, self.get_vm_by_uuid)
+      if not vm_data:
+        logger.error("Failed to configure network for {}".format(vm_name))
+        return
+    else:
+      logger.error("Failed to configure network for {}".format(vm_name))
+      AplosUtil.print_failure(result)
+      return
+
+    logger.info("Configured network for {}".format(vm_name))
+
+    # Power-on and reboot for cloudinit
+
+    # Final VM configuration
     status, result = self.get_vm_by_uuid(vm_uuid)
     if status == 200:
       logger.info("VM: {}".format(json.dumps(result, indent=2)))
@@ -1492,6 +1516,22 @@ class AplosClient(object):
       return
 
     return True
+
+  def get_network_by_name(self, name):
+    """ Get a network by its name """
+    endpoint = "subnets/list"
+    body = {
+      "filter": "name==" + name
+    }
+    status, result = self.POST(endpoint=endpoint, body=body)
+
+    entities = result.get("entities")
+    if len(entities) > 1:
+      raise ValueError("multiple networks with name {}".format(name))
+    if len(entities) < 1:
+      raise ValueError("no network with name {}".format(name))
+
+    return status, entities[0]
 
   def get_vm_by_name(self, name):
     """ Get a VM by its name """
@@ -1518,27 +1558,26 @@ class AplosClient(object):
   def create_vm(self,
       cluster_uuid,
       template_vm,
+      vm_name,
       os_family,
-      name,
-      ip,
+      nics,
       memory_size_mib=2048,
       num_vcpus=2,
-      num_cores_per_vcpu=1,
-      power_on=True):
-    userdata = CLOUDINIT_MAP.get(os_family).replace("<desired-ip>", ip).replace("<desired-hostname>", name)
+      num_cores_per_vcpu=1):
+
+    static_ip = defaultdict(dict, nics)["nic.0"]["ip"]
+    userdata = CLOUDINIT_MAP.get(os_family).replace(
+        "<desired-ip>", static_ip).replace(
+        "<desired-hostname>", vm_name)
     metadata = json.dumps({
-      "uuid": name,
+      "uuid": vm_name,
       "network": {
         "config": "disabled"
       }
     })
 
-    power_state = "OFF"
-    if power_on:
-      power_state = "ON"
-
     spec = {
-      "name": name,
+      "name": vm_name,
       "cluster_reference": {
         "kind": "cluster",
         "uuid": cluster_uuid,
@@ -1548,15 +1587,8 @@ class AplosClient(object):
           "kind": "vm",
           "uuid": template_vm.uuid
         },
-        "nic_list": [
-          {
-            "subnet_reference": {
-              "kind": "subnet",
-              "uuid": NETWORK_UUID
-            }
-          }
-        ],
-        "power_state": power_state,
+        "nic_list": [],
+        "power_state": "OFF",
         "num_sockets": int(num_vcpus),
         "num_vcpus_per_socket": int(num_cores_per_vcpu),
         "memory_size_mib": int(memory_size_mib),
@@ -1577,4 +1609,48 @@ class AplosClient(object):
     }
 
     status, result = self.POST(endpoint="vms", body=body)
+    return status, result
+
+  def configure_vm_network(self, vm_data, nics):
+    def create_nic_spec(key, value):
+      if not value:
+        return
+      if not hasattr(value, "get"):
+        return
+
+      name = value.get("name")
+      status, result = self.get_network_by_name(name)
+      if not result:
+        return
+      uuid = defaultdict(dict, result)["metadata"].get("uuid")
+      if not uuid:
+        return
+
+      return {
+        "subnet_reference": {
+          "kind": "subnet",
+          "uuid": uuid
+        }
+      }
+
+    nic_list = list(create_nic_spec(kk, vv) for kk, vv in nics.items())
+    nic_list = filter(bool, nic_list)
+
+    spec = vm_data["spec"]
+    spec["resources"]["nic_list"] = nic_list
+    spec["resources"]["power_state"] = "ON"
+    spec_version = defaultdict(dict, vm_data)["metadata"].get("spec_version")
+    body = {
+      "api_version": "3.0",
+      "metadata": {
+        "kind": "vm",
+        "spec_version": spec_version
+      },
+      "spec": spec
+    }
+
+    vm_uuid = defaultdict(dict, vm_data)["metadata"].get("uuid")
+    endpoint="vms/{}".format(vm_uuid)
+
+    status, result = self.PUT(endpoint=endpoint, body=body)
     return status, result
