@@ -1408,6 +1408,8 @@ class AplosVmStatus(object):
     for nic in self.nics:
       nic_summaries.update( nic.to_summary() )
 
+    description = self.tags or self.description
+
     # salt.cloud.get_vmnames_by_action() expects 'state' field
     # crashes with KeyError otherwise
     state = "running" if self.power_state else "stopped"
@@ -1415,7 +1417,7 @@ class AplosVmStatus(object):
     output = {
       "uuid": self.uuid,
       "name": self.name,
-      "description": self.description,
+      "description": description,
       "num_vcpus": self.num_vcpus,
       "num_cores_per_vcpu": self.num_cores_per_vcpu,
       "memory_size_mib": self.memory_size_mib,
