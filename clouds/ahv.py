@@ -822,11 +822,27 @@ def get_conn(version=2):
   clienttype = AplosClient
   if version < 3:
     clienttype = LegacyClient
-  conf = get_configured_provider()
+
+  vm_ = get_configured_provider()
+
+  prism_host = config.get_cloud_config_value(
+    "prism_host", vm_, __opts__, search_global=False
+  )
+  prism_user = config.get_cloud_config_value(
+    "prism_user", vm_, __opts__, search_global=False
+  )
+  prism_password = config.get_cloud_config_value(
+    "prism_password", vm_, __opts__, search_global=False
+  )
+  verify_ssl = config.get_cloud_config_value(
+    "verify_ssl", vm_, __opts__, search_global=False
+  )
+
   client = clienttype(
-    host=conf["prism_host"],
-    user=conf["prism_user"],
-    password=conf["prism_password"]
+    host=prism_host,
+    user=prism_user,
+    password=prism_password,
+    verify_ssl=verify_ssl
   )
   return client
 
@@ -1580,10 +1596,11 @@ class AplosUtil(object):
 
 
 class AplosClient(object):
-  def __init__(self, host, user, password):
+  def __init__(self, host, user, password, verify_ssl=True):
     self.host = host
     self.user = user
     self.password = password
+    self.verify_ssl = verify_ssl
 
     self.content_type = "application/json"
     self.charset = "utf-8"
@@ -1602,7 +1619,7 @@ class AplosClient(object):
       "Content-Type": "{}; charset={}".format(self.content_type, self.charset),
       "Accept": self.accept_type
     }
-    verify = False # allow unverified https
+    verify = self.verify_ssl
 
     kwargs = {}
     if body:
