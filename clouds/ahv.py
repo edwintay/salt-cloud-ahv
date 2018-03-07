@@ -864,74 +864,24 @@ def _filter_arguments(kwargs):
   return call, kwargs
 
 
-#==============================================================================
-# Decorators
-#==============================================================================
-
-def action(func):
-  """
-  Decorator which ensures 'func' was properly called as an "action".
-
-  Raises:
-    (SaltCloudSystemExit) Error message if the method was not invoked as a
-      salt-cloud action call.
-  """
-  @functools.wraps(func)
-  def _action(*args, **kwargs):
-    if kwargs.get("call") != "action":
-      raise SaltCloudSystemExit(
-        "The %s action must be invoked with -a or --action" % func.__name__)
-    return func(*args, **kwargs)
-  return _action
-
-
-def function(func):
-  """
-  Decorator which ensures 'func' was properly called as a "function".
-
-  Raises:
-    (SaltCloudSystemExit) Error message if the method was not invoked as a
-      salt-cloud function call.
-  """
-  @functools.wraps(func)
-  def _action(*args, **kwargs):
-    if kwargs.get("call") != "function":
-      raise SaltCloudSystemExit(
-        "The %s action must be invoked with -f or --function" % func.__name__)
-    return func(*args, **kwargs)
-  return _action
-
-
-def conn_in(func):
-  """
-  Decorator which acquires and injects a REST client if necessary.
-  """
-  @functools.wraps(func)
-  def _conn_in(*args, **kwargs):
-    if "conn" not in kwargs:
-      kwargs["conn"] = get_conn()
-    return func(*args, **kwargs)
-  return _conn_in
-
 
 #==============================================================================
 # Salt cloud driver interface
 #==============================================================================
-@conn_in
-def create(vm_, conn=None, call=None):
+def create(vm_, call=None):
   """
   Create a VM as defined by 'vm_'.
 
   Args:
     vm_ (dict): VM configuration as provided by salt cloud.
-    conn (PrismAPIClient|None): Optional. Connection to use. If None, a new
-      connection will be injected by the @conn_in decorator.
     call (str|None): Method by which this functions is being invoked.
 
   Returns:
     (dict<str,str>): Map of configuration steps to boolean success.
   """
   SaltCreatingEvent.fire(vm_)
+
+  conn = get_conn()
 
   logg = _attach_vm_context(vm_)
   ret = {"created": False,
@@ -1009,15 +959,13 @@ def create(vm_, conn=None, call=None):
   return ret
 
 
-@conn_in
-def destroy(vm_name, conn=None, call=None):
+
+def destroy(vm_name, call=None):
   """
   Destroys VM 'vm_name'.
 
   Args:
     vm_name (str): Name of VM to destroy.
-    conn (PrismAPIClient|None): Optional. Connection to use. If None, a new
-      connection will be injected by the @conn_in decorator.
     call (str|None): Method by which this functions is being invoked.
 
   Returns:
@@ -1028,6 +976,8 @@ def destroy(vm_name, conn=None, call=None):
       not uniquely identify the VM.
   """
   SaltDestroyingEvent.fire(vm_name)
+
+  conn = get_conn()
 
   logg = _attach_vm_context({"name": vm_name})
   logg.info("Handling instance destroy...")
@@ -1043,39 +993,41 @@ def destroy(vm_name, conn=None, call=None):
 
 
 
-@conn_in
-def avail_locations(conn=None, call=None):
+def avail_locations(call=None):
   """
   List available clusters.
 
   Args:
-    conn (PrismAPIClient|None): Optional. Connection to use. If None, a new
-      connection will be injected by the @conn_in decorator.
     call (str|None): Method by which this functions is being invoked.
 
   Returns:
     (dict<str,dict>): Map of cluster names to cluster metadata for clusters
       accessible via the configured Prism IP.
   """
+  if call != "function" and call is not None:
+    raise SaltCloudSystemExit("The avail_locations function must be called "
+      "with -f or --function, or with the --list-locations option.")
+
+  conn = get_conn()
   return dict((cluster["name"], cluster) for cluster in conn.clusters_get())
 
-
-@conn_in
-def avail_images(conn=None, call=None):
+def avail_images(call=None):
   """
   List available VM images.
 
   Args:
-    conn (PrismAPIClient|None): Optional. Connection to use. If None, a new
-      connection will be injected by the @conn_in decorator.
     call (str|None): Method by which this functions is being invoked.
 
   Returns:
     (dict<str,dict>): Map of image names to image metadata for all images
       known to the image service.
   """
-  return dict((img["name"], img) for img in conn.images_get())
+  if call != "function" and call is not None:
+    raise SaltCloudSystemExit("The avail_images function must be called "
+      "with -f or --function, or with the --list-images option.")
 
+  conn = get_conn()
+  return dict((img["name"], img) for img in conn.images_get())
 
 def avail_sizes(call=None):
   """
@@ -1087,6 +1039,10 @@ def avail_sizes(call=None):
   Returns:
     (dict<str, str>) Map of argument names to descriptions.
   """
+  if call != "function":
+    raise SaltCloudSystemExit("The avail_sizes function must be called "
+      "with -f or --function, or with the --list-sizes option.")
+
   return {
     "<num_vcpus>": "Number of vCPUs with which to configure the VM",
     "<num_cores_per_vcpu>":
@@ -1094,13 +1050,9 @@ def avail_sizes(call=None):
     "<memory_mb>": "Amount (in MB) of RAM with which to configure the VM",
   }
 
-
-@conn_in
-def list_nodes(conn=None, call=None):
+def list_nodes(call=None):
   """
   Args:
-    conn (PrismAPIClient|None): Optional. Connection to use. If None, a new
-      connection will be injected by the @conn_in decorator.
     call (str|None): Method by which this functions is being invoked.
 
   NB: Terminology conflicts with Acropolis terminology.
@@ -1109,75 +1061,29 @@ def list_nodes(conn=None, call=None):
     (dict<str,SaltVm>) Map of VM names to canonical salt metadata for
       corresponding VMs.
   """
+  if call == "action":
+    raise SaltCloudSystemExit("The list_nodes function cannot be called "
+      "as an action.")
+
+  conn = get_conn()
   return dict((vm["vmName"], SaltVm(vm).to_dict()) for vm in conn.vms_get())
 
-
-@conn_in
-def list_nodes_full(conn=None, call=None):
-  """
-  Args:
-    conn (PrismAPIClient|None): Optional. Connection to use. If None, a new
-      connection will be injected by the @conn_in decorator.
-    call (str|None): Method by which this functions is being invoked.
-
-  NB: Terminology conflicts with Acropolis terminology.
-
-  Returns:
-    (dict<str,AcropolisVm>): Canonical salt metadata enriched with
-      additional Acropolis-specific metadata for available VMs.
-  """
-  return dict((vm["vmName"], vm) for vm in conn.vms_get())
-
-
-@conn_in
-def list_nodes_select(conn=None, call=None):
-  """
-  Args:
-    call (str|None): Kind of call by which this function was invoked.
-    conn (PrismAPIClient|None): Optional. Connection to use. If None, a new
-      connection will be injected by the @conn_in decorator.
-    call (str|None): Method by which this functions is being invoked.
-
-  NB: Terminology conflicts with Acropolis terminology.
-
-  Returns:
-    (dict<str, dict>) Map of VM names to VM metadata for available VMs
-      restricted to specified fields.
-  """
-  return salt.utils.cloud.list_nodes_select(
-    list_nodes_full(conn=conn, call="function"),
-    __opts__["query.selection"], call)
-
-
-@action
-@conn_in
-def show_instance(name, conn=None, call=None):
+def show_instance(name, call=None):
   """
   Shows details about VM 'name'.
 
   Args:
     name (str): Name of VM to query.
-    conn (PrismAPIClient|None): Optional. Connection to use. If None, a new
-      connection will be injected by the @conn_in decorator.
     call (str|None): Method by which this functions is being invoked.
 
   Returns:
     (dict<str, AcropolisVm>) Map of VM name to full VM metadata.
   """
+  if call != "action":
+    raise SaltCloudSystemExit("The show_instance action must be called "
+      "with -a or --action.")
+
+  conn = get_conn()
+
   vm_json = get_entity_by_key(conn.vms_get(name=name), "vmName", name)
   return remove_keys(vm_json, ["stats, usageStats"])
-
-#==============================================================================
-# Additional public actions, functions
-#==============================================================================
-
-@function
-def generate_sample_profile(call=None):
-  # TODO
-  pass
-
-
-@function
-def generate_sample_map(call=None):
-  # TODO
-  pass
