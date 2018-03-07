@@ -33,11 +33,14 @@ Globals injected by salt
   __utils__(dict)
 """
 
+import base64
 import functools
 import json
 import logging
 import time
 import urllib
+
+from collections import defaultdict
 
 # pylint: disable=import-error
 from salt.exceptions import (
@@ -55,6 +58,7 @@ try:
 except ImportError:
   HAS_REQUESTS = False
 # pylint: enable=import-error
+
 
 
 # Start logging
@@ -103,8 +107,6 @@ def _attach_vm_context(vm_):
   return VmContextAdapter(logger, {
     "vmname": vm_["name"]
   })
-
-
 
 
 
@@ -443,7 +445,7 @@ class AhvVmCreateSpec(object):
 # REST API Client
 #==============================================================================
 
-class PrismAPIClient(object):
+class LegacyClient(object):
   """
   Client for the Prism v1 REST API and v0.8 management REST API.
   """
@@ -808,9 +810,12 @@ class PrismAPIClient(object):
 #==============================================================================
 # Utils
 #==============================================================================
-def get_conn():
+def get_conn(version=2):
+  clienttype = AplosClient
+  if version < 3:
+    clienttype = LegacyClient
   conf = get_configured_provider()
-  client = PrismAPIClient(
+  client = clienttype(
     host=conf["prism_host"],
     user=conf["prism_user"],
     password=conf["prism_password"]
@@ -853,6 +858,34 @@ def _filter_arguments(kwargs):
 #==============================================================================
 # Salt cloud driver interface
 #==============================================================================
+def create(vm_, call=None):
+  conn = get_conn(version=3)
+
+  logg = _attach_vm_context(vm_)
+  ret = {
+    "created": False,
+    "powered on": False,
+    "deployed minion": False
+  }
+  logg.info("Handling instance create...")
+
+  vm_name = vm_["name"]
+  ipaddr = vm_["network"].values()[0]["ip"]
+
+  logg.debug("Issuing CloneVM request to Prism...")
+  task_json = conn.clone_vm(
+    vm_name=vm_name,
+    vm_ip=ipaddr,
+    size_mem_mib=2048,
+    num_vcpus=2
+  )
+  logg.debug("VM clone task complete")
+
+  logg.info("VM created")
+  ret["created"] = True
+
+  return ret
+
 def _create(vm_, call=None):
   """
   Create a VM as defined by 'vm_'.
@@ -1073,3 +1106,374 @@ def show_instance(name, call=None):
 
   vm_json = get_entity_by_key(conn.vms_get(name=name), "vmName", name)
   return remove_keys(vm_json, ["stats, usageStats"])
+
+
+
+# ===========================================================================
+# Prism v3 client
+# ===========================================================================
+CLUSTER_UUID = "0005419d-d510-424c-0000-00000000b3b0"
+NETWORK_UUID = "74e481f9-275d-4c65-89cc-705c16248450"
+
+TMPL_UUID_MAP = {
+  "centos-7.4": "108a0510-7c4c-4ee3-8674-92c8afcbf6ce",
+  "ubuntu-16.04": "fb31e4ba-4c5d-449e-afb0-f242d075d9cc"
+}
+
+CENTOS_CLOUD_CFG=r"""#cloud-config
+write_files:
+  - path: /etc/sysconfig/network-scripts/ifcfg-eth0
+    owner: root:root
+    permissions: '0644'
+    content: |
+      DEVICE=eth0
+      TYPE=Ethernet
+      DEFROUTE=yes
+      NM_CONTROLLED=no
+      IPV4_FAILURE_FATAL=yes
+      IPV6INIT=no
+      ONBOOT=yes
+
+      BOOTPROTO=none
+      IPADDR=<desired-ip>
+      PREFIX=24
+      GATEWAY=10.4.10.1
+      DNS1=10.4.8.15
+      DNS2=10.4.8.16
+      DOMAIN="it.nutanix.com corp.nutanix.com nutanix.com"
+
+bootcmd:
+  - rm -f /etc/resolv.conf*
+  - ifdown eth0 && ifup eth0
+  - ip -o -4 addr list eth0 | awk '{ print $4 }' | cut -d/ -f1 | awk '{ printf "\n%-11s %-31s %s\n", $1, "<desired-hostname>.it.nutanix.com", "<desired-hostname>"}' >> /etc/hosts
+runcmd:
+  - hostnamectl set-hostname <desired-hostname>.it.nutanix.com
+  - touch /etc/cloud/cloud-init.disabled
+
+datasource_list:
+  - ConfigDrive
+cloud_init_modules:
+  - write_files
+  - bootcmd
+cloud_config_modules:
+  - runcmd
+  - scripts_user
+cloud_final_modules:
+  - final_message
+"""
+
+UBUNTU_CLOUD_CFG=r"""#cloud-config
+hostname: <desired-hostname>
+fqdn: <desired-hostname>.it.nutanix.com
+write_files:
+  - path: /etc/network/interfaces
+    owner: root:root
+    permissions: '0644'
+    content: |
+      # This file describes the network interfaces available on your system
+      # and how to activate them. For more information, see interfaces(5).
+
+      source /etc/network/interfaces.d/*
+
+      # The loopback network interface
+      auto lo
+      iface lo inet loopback
+
+      # The primary network interface
+      auto eth0
+      iface eth0 inet static
+        address <desired-ip>
+        netmask 255.255.255.0
+        gateway 10.4.10.1
+        dns-nameservers 10.4.8.15 10.4.8.16
+        dns-search it.nutanix.com corp.nutanix.com nutanix.com
+
+bootcmd:
+  - rm -f /run/resolvconf/resolv.conf
+  - ifdown eth0 && ifup eth0
+  - ip -o -4 addr list eth0 | awk '{ print $4 }' | cut -d/ -f1 |
+    awk '{ printf "\n%-11s %-31s %s\n", $1, "<desired-hostname>.it.nutanix.com", "<desired-hostname>"}' >> /etc/hosts
+runcmd:
+  - touch /etc/cloud/cloud-init.disabled
+
+datasource_list:
+  - ConfigDrive
+cloud_init_modules:
+  - write_files
+  - bootcmd
+  - set_hostname
+cloud_config_modules:
+  - runcmd
+  - scripts_user
+cloud_final_modules:
+  - final_message
+
+system_info:
+  distro: ubuntu
+"""
+
+CLOUDINIT_MAP = {
+  "centos-7.4": CENTOS_CLOUD_CFG,
+  "ubuntu-16.04": UBUNTU_CLOUD_CFG
+}
+
+# ===========================================================================
+# api entities
+# ===========================================================================
+class AplosVmStatus(object):
+  @classmethod
+  def from_dict(klass, data):
+    data = defaultdict(dict, data)
+
+    metadata = data["metadata"]
+    uuid = metadata.get("uuid")
+
+    status = data["status"]
+    name = status.get("name")
+
+    kwargs = {
+      "rawstatus": status,
+      "uuid": uuid,
+      "name": name
+    }
+    return klass(**kwargs)
+
+  def __init__(self, rawstatus, uuid, name):
+    self._status = rawstatus
+
+    self.uuid = uuid
+    self.name = name
+
+
+
+class AplosUtil(object):
+  @classmethod
+  def print_failure(klass, result):
+    if not result:
+      return
+
+    status = result.get("status")
+    if not status:
+      return
+
+    state = status.get("state")
+    if state.lower() == "error":
+      logger.error(json.dumps(status, indent=2))
+    else:
+      logger.error("State: {}\nReason: {}\nDetails: {}\nMessage: {}".format(
+        state,
+        result.get("reason"),
+        result.get("details"),
+        result.get("message")
+      ))
+
+  @staticmethod
+  def is_task_complete(status, result):
+    if result and str(result.get('code')) == "404":
+      return True
+    if result and (status == 200 or status == 202):
+      api_status = defaultdict(dict, result)["status"].get("state")
+      logger.info(api_status)
+      if api_status == "COMPLETE":
+        return True
+      elif api_status.lower() == "error":
+        return None
+    return False
+
+  @classmethod
+  def track_request(klass,
+      status,
+      result,
+      status_fn,
+      status_retries=100,
+      status_wait_secs=3,
+      completed_fn=None
+    ):
+    uuid = defaultdict(dict, result)["metadata"].get("uuid")
+    if not uuid:
+      return None
+
+    if completed_fn is None:
+      completed_fn = klass.is_task_complete
+
+    start_time = time.time()
+    for count in range(status_retries):
+      completed = completed_fn(status, result)
+      if completed is None:
+        # terminate on error
+        break
+
+      if completed:
+        end_time = time.time()
+        time_taken = end_time - start_time
+        logger.info("Time to completion (seconds): {:.2f}".format(time_taken))
+        return uuid
+
+      (status, result) = status_fn(uuid)
+      time.sleep(status_wait_secs)
+
+    klass.print_failure(result)
+    return None
+
+
+
+class AplosClient(object):
+  def __init__(self, host, user, password):
+    self.host = host
+    self.user = user
+    self.password = password
+
+    self.content_type = "application/json"
+    self.charset = "utf-8"
+    self.accept_type = "application/json"
+
+  # =========================================================================
+  # http helpers
+  # =========================================================================
+  def request(self, method, endpoint, body=None):
+    url = "https://{}:9440/api/nutanix/v3/{}".format(
+      self.host, endpoint
+    )
+
+    auth = (self.user, self.password)
+    headers = {
+      "Content-Type": "{}; charset={}".format(self.content_type, self.charset),
+      "Accept": self.accept_type
+    }
+    verify = False # allow unverified https
+
+    kwargs = {}
+    if body:
+      kwargs["json"] = body
+
+    try:
+      response = requests.request(method,
+        url,
+        auth=auth,
+        headers=headers,
+        verify=verify,
+        **kwargs
+      )
+    except requests.exceptions.RequestException as ex:
+      return 408, ex.response
+    except Exception as ex:
+      logger.error("requests: {}".format(ex))
+      return 408, None
+
+    try:
+      rbody = response.json()
+    except ValueError as ex:
+      logger.debug("requests: response body is not JSON")
+      rbody = response.text
+
+    return response.status_code, rbody
+
+  def GET(self, *args, **kwargs):
+    return self.request("GET", *args, **kwargs)
+
+  def POST(self, *args, **kwargs):
+    return self.request("POST", *args, **kwargs)
+
+  # =========================================================================
+  # commands
+  # =========================================================================
+  def clone_vm(self, vm_name, vm_ip, size_mem_mib, num_vcpus):
+    os_key = "centos-7.4"
+
+    tmpl_uuid = TMPL_UUID_MAP.get(os_key)
+
+    (status, result) = self.get_vm(tmpl_uuid)
+    if status >= 300:
+      logger.error("Failed to retrieve info for template {}".format(tmpl_uuid))
+      AplosUtil.print_failure(result)
+      return False
+
+    template_vm = AplosVmStatus.from_dict(result)
+    logger.info("Cloning VM from template {}".format(template_vm.name))
+
+    status, result = self.create_vm(template_vm, vm_name, vm_ip, os_key, size_mem_mib, num_vcpus)
+    if str(status) == "408":
+      logger.error(json.dumps(result.get("message_list"), indent=2))
+      return False
+
+    logger.info("{}\n{}".format(status, json.dumps(result, indent=2)))
+    # Track if the VM is created
+    if status == 202:
+      vm_uuid = AplosUtil.track_request(status, result, self.get_vm)
+      if not vm_uuid:
+        logger.error("Failed to create VM {}".format(vm_name))
+        return
+    else:
+      logger.error("Failed to create VM {}".format(vm_name))
+      AplosUtil.print_failure(result)
+      return
+
+    logger.info("Cloned VM {} with uuid {}".format(vm_name, vm_uuid))
+
+    # Get the VM info.
+    (status, result) = self.get_vm(vm_uuid)
+    if status == 200:
+      logger.info("VM: {}".format(json.dumps(result, indent=2)))
+    else:
+      logger.error("Failed to get the information for vm {}".format(vm_uuid))
+      AplosUtil.print_failure(result)
+      return
+
+    return True
+
+  def get_vm(self, vm_uuid):
+    """ Get a VM with particular UUID """
+    endpoint = "vms/{}".format(vm_uuid)
+    status, result = self.GET(endpoint=endpoint)
+    return status, result
+
+  def create_vm(self, template_vm, name, ip, os_key, size_mem_mib, num_vcpus):
+    userdata = CLOUDINIT_MAP.get(os_key).replace("<desired-ip>", ip).replace("<desired-hostname>", name)
+    metadata = json.dumps({
+      "uuid": name,
+      "network": {
+        "config": "disabled"
+      }
+    })
+
+    spec = {
+      "name": name,
+      "cluster_reference": {
+        "kind": "cluster",
+        "uuid": CLUSTER_UUID,
+      },
+      "resources": {
+        "parent_reference": {
+          "kind": "vm",
+          "uuid": template_vm.uuid
+        },
+        "nic_list": [
+          {
+            "subnet_reference": {
+              "kind": "subnet",
+              "uuid": NETWORK_UUID
+            }
+          }
+        ],
+        "power_state": "ON",
+        "num_sockets": int(num_vcpus),
+        "num_vcpus_per_socket": 1,
+        "memory_size_mib": int(size_mem_mib),
+        "guest_customization": {
+          "cloud_init": {
+            "meta_data": base64.b64encode(metadata),
+            "user_data": base64.b64encode(userdata)
+          }
+        }
+      }
+    }
+    body = {
+      "api_version": "3.0",
+      "metadata": {
+        "kind": "vm"
+      },
+      "spec": spec
+    }
+
+    status, result = self.POST(endpoint="vms", body=body)
+    return status, result
