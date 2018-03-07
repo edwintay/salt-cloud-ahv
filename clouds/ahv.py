@@ -1439,6 +1439,15 @@ class AplosVmSpec(object):
     uuid = metadata.get("uuid")
 
     spec = data["spec"]
+    description = spec.get("description")
+
+    # Custom tags if description is JSON
+    tags = None
+    try:
+      tags = json.loads(description)
+    except ValueError as ex:
+      pass
+
     power_state = spec["resources"].get("power_state")
 
     disks = [ AplosDisk.from_dict(rawdisk)
@@ -1449,18 +1458,25 @@ class AplosVmSpec(object):
       "rawspec": spec,
       "uuid": uuid,
       "version": version,
+      "tags": tags,
       "disks": disks,
       "power_state": AplosPowerState(power_state)
     }
     return klass(**kwargs)
 
-  def __init__(self, rawspec, uuid, version, disks=None, power_state=None):
+  def __init__(self, rawspec,
+      uuid,
+      version,
+      tags=None,
+      disks=None,
+      power_state=None):
     self._spec = rawspec
 
     self.uuid = uuid
     self.version = version
     self.disks = disks or []
     self.power_state = power_state or APLOS_POWER_STATE_OFF
+    self.tags = tags or {}
 
   def to_dict(self):
     output = self._spec
@@ -1468,6 +1484,9 @@ class AplosVmSpec(object):
     output["resources"]["disk_list"] = [
       disk.to_dict() for disk in self.disks
     ]
+    if self.tags:
+      self.tags.pop("is_template", None)
+      output["description"] = json.dumps(self.tags)
     return output
 
 class AplosDisk(object):
