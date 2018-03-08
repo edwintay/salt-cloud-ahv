@@ -1334,6 +1334,13 @@ class AplosVmStatus(object):
     name = status.get("name")
     description = status.get("description")
 
+    # Custom tags if description is JSON
+    tags = None
+    try:
+      tags = json.loads(description)
+    except ValueError as ex:
+      pass
+
     resources = status["resources"]
     num_vcpus = resources.get("num_sockets")
     num_cores_per_vcpu = resources.get("num_vcpus_per_socket")
@@ -1351,6 +1358,7 @@ class AplosVmStatus(object):
       "uuid": uuid,
       "name": name,
       "description": description,
+      "tags": tags,
 
       "num_vcpus": num_vcpus,
       "num_cores_per_vcpu": num_cores_per_vcpu,
@@ -1365,6 +1373,7 @@ class AplosVmStatus(object):
       uuid,
       name,
       description=None,
+      tags=None,
       num_vcpus=0,
       num_cores_per_vcpu=0,
       memory_size_mib=0,
@@ -1377,6 +1386,7 @@ class AplosVmStatus(object):
     self.uuid = uuid
     self.name = name
     self.description = description
+    self.tags = tags or {}
 
     self.num_vcpus = num_vcpus
     self.num_cores_per_vcpu = num_cores_per_vcpu
