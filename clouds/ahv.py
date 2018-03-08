@@ -562,6 +562,32 @@ def avail_locations(*args, **kwargs):
   )
   return result
 
+def avail_images(*args, **kwargs):
+  """
+  List available template VMs.
+
+  We define a template VM as a VM that has a description formatted as JSON,
+  and contains 'is_template: true'.
+
+  Args:
+    call (str|None): Method by which this functions is being invoked.
+
+  Returns:
+    (dict<str,dict>): Map of template names to template summary.
+  """
+  call, kwargs = _filter_arguments(kwargs)
+  if call != "function" and call is not None:
+    raise SaltCloudSystemExit("The avail_sizes function must be called "
+      "with -f/--function <PROVIDER>, or with --list-images.")
+
+  conn = get_conn(version=3)
+  tmpls = conn.list_vms()
+
+  result = dict( (tmpl.name, tmpl.to_summary())
+    for tmpl in tmpls if tmpl.tags.get("is_template")
+  )
+  return result
+
 def avail_sizes(*args, **kwargs):
   """
   Lists available options for configuring VM CPU/RAM.
@@ -1421,7 +1447,6 @@ class AplosClient(object):
     entities = result.get("entities", [])
     clusters = [ AplosClusterStatus.from_dict(entity) for entity in entities ]
     return clusters
-
 
   def create_vm(self,
       cluster_uuid,
